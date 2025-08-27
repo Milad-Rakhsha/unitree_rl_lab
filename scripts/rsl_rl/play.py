@@ -29,6 +29,7 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument("--newton_visualizer", action="store_true", default=False, help="Enable Newton rendering.")
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -51,6 +52,11 @@ import torch
 
 from rsl_rl.runners import OnPolicyRunner
 
+from isaaclab.utils.timer import Timer
+
+Timer.enable = False
+Timer.enable_display_output = False
+
 import isaaclab_tasks  # noqa: F401
 from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
 from isaaclab.utils.assets import retrieve_file_path
@@ -72,6 +78,7 @@ def main():
         num_envs=args_cli.num_envs,
         use_fabric=not args_cli.disable_fabric,
         entry_point_key="play_env_cfg_entry_point",
+        newton_visualizer=args_cli.newton_visualizer,
     )
     agent_cfg: RslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
 
