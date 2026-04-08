@@ -7,6 +7,9 @@ FSM:
     Velocity:
       id: 3
       type: RLBase
+    Stabilize:
+      id: 4
+      type: RLBase
   Passive:
     transitions: 
       FixStand: LT + A.on_pressed
@@ -16,6 +19,9 @@ FSM:
     transitions: 
       Passive: LT + B.on_pressed
       Velocity: start.on_pressed
+    auto_velocity:
+      enabled: true
+      delay_s: 0.25
     kp: [60, 80, 80, 60, 80, 80, 60, 80, 80, 60, 80, 80]
     kd: [5, 4, 4, 5, 4, 4, 5, 4, 4, 5, 4, 4]
     ts: [0, 1, 2]
@@ -29,4 +35,24 @@ FSM:
       Passive: LT + B.on_pressed
     # policy_dir: ../../../logs/rsl_rl/unitree_go2_velocity/2025-11-27_18-19-35
     policy_dir: ../../../logs/rsl_rl/unitree_go2_velocity/2026-04-01_19-12-55
-    
+    surprise:
+      enabled: true
+      # When surprise trips, FSM switches to Stabilize (RL policy below), not FixStand.
+      # Paths are relative to deploy/robots/go2 by default.
+      model_path: ../../../../Surprise/data/go2/forward_model.onnx
+      stats_path: ../../../../Surprise/data/go2/normalization_stats.yaml
+      # Start with a high threshold and tune downward after a baseline run.
+      threshold: 50.0
+      ema_alpha: 0.1
+      use_ema: true
+      min_steps: 25
+      consecutive_steps: 3
+      log_every_steps: 200
+  Stabilize:
+    transitions:
+      Passive: LT + B.on_pressed
+      Velocity: start.on_pressed
+    auto_velocity:
+      enabled: true
+      duration_s: 0.5
+    policy_dir: ../../../logs/rsl_rl/unitree_go2_stabilize/2026-04-06_10-50-28
