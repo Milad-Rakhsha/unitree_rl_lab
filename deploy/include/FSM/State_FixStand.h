@@ -15,6 +15,31 @@ public:
         ts_ = param::config["FSM"]["FixStand"]["ts"].as<std::vector<float>>();
         qs_ = param::config["FSM"]["FixStand"]["qs"].as<std::vector<std::vector<float>>>();
         assert(ts_.size() == qs_.size());
+
+        auto cfg = param::config["FSM"]["FixStand"];
+        if (cfg["auto_velocity"] && cfg["auto_velocity"]["enabled"].as<bool>(false))
+        {
+            auto_velocity_enabled_ = true;
+            auto_velocity_delay_s_ = cfg["auto_velocity"]["delay_s"].as<float>(auto_velocity_delay_s_);
+            if (FSMStringMap.right.count("Velocity"))
+            {
+                registered_checks.emplace_back(
+                    std::make_pair(
+                        [this]()->bool{
+                            const double now = (double)unitree::common::GetCurrentTimeMillisecond() * 1e-3;
+                            const double t = now - t0_;
+                            const double min_t = (ts_.empty() ? 0.0 : ts_.back()) + auto_velocity_delay_s_;
+                            return auto_velocity_enabled_ && (t0_ > 0.0) && (t > min_t);
+                        },
+                        FSMStringMap.right.at("Velocity")
+                    )
+                );
+            }
+            else
+            {
+                spdlog::warn("FixStand.auto_velocity enabled but Velocity FSM not found.");
+            }
+        }
     }
 
     void enter()
@@ -51,9 +76,11 @@ public:
     }
 
 private:
-    double t0_;
+    double t0_ = 0.0;
     std::vector<float> ts_;
     std::vector<std::vector<float>> qs_;
+    bool auto_velocity_enabled_ = false;
+    float auto_velocity_delay_s_ = 0.0f;
 };
 
 REGISTER_FSM(State_FixStand)

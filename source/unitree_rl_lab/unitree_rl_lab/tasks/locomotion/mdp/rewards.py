@@ -205,6 +205,35 @@ Other rewards.
 """
 
 
+def root_body_velocity_l2(
+    env: ManagerBasedRLEnv, ang_weight: float = 0.2, asset_cfg: SceneEntityCfg = SceneEntityCfg('robot')
+) -> torch.Tensor:
+    """L2 penalty on root linear and angular velocity in the body frame (stability at rest)."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    lin = torch.sum(torch.square(asset.data.root_lin_vel_b), dim=-1)
+    ang = torch.sum(torch.square(asset.data.root_ang_vel_b), dim=-1)
+    return lin + ang_weight * ang
+
+
+def upright_gravity_exp(
+    env: ManagerBasedRLEnv, std: float, asset_cfg: SceneEntityCfg = SceneEntityCfg('robot')
+) -> torch.Tensor:
+    """Shaped reward: body z-axis gravity component should match upright standing (~ -1 in body frame)."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    gz = asset.data.projected_gravity_b[:, 2]
+    err = torch.square(gz + 1.0)
+    return torch.exp(-err / std)
+
+
+def default_joint_pose_exp(
+    env: ManagerBasedRLEnv, std: float, asset_cfg: SceneEntityCfg = SceneEntityCfg('robot')
+) -> torch.Tensor:
+    """Shaped reward for joint positions near the default standing pose."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    err = torch.sum(torch.square(asset.data.joint_pos - asset.data.default_joint_pos), dim=-1)
+    return torch.exp(-err / std)
+
+
 def joint_mirror(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, mirror_joints: list[list[str]]) -> torch.Tensor:
     # extract the used quantities (to enable type-hinting)
     asset: Articulation = env.scene[asset_cfg.name]
