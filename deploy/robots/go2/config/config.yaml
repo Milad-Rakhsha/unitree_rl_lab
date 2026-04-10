@@ -34,7 +34,7 @@ FSM:
     transitions: 
       Passive: LT + B.on_pressed
     # policy_dir: ../../../logs/rsl_rl/unitree_go2_velocity/2025-11-27_18-19-35
-    policy_dir: ../../../logs/rsl_rl/unitree_go2_velocity/2026-04-01_19-12-55
+    policy_dir: ../../../logs/rsl_rl/unitree_go2_velocity_flat/2026-04-08_14-19-59
     surprise:
       enabled: true
       # When surprise trips, FSM switches to Stabilize (RL policy below), not FixStand.
@@ -42,12 +42,12 @@ FSM:
       model_path: ../../../../Surprise/data/go2/forward_model.onnx
       stats_path: ../../../../Surprise/data/go2/normalization_stats.yaml
       # Start with a high threshold and tune downward after a baseline run.
-      threshold: 50.0
-      ema_alpha: 0.1
+      threshold: 10.0
+      ema_alpha: 0.05
       use_ema: true
-      min_steps: 25
+      min_steps: 50
       consecutive_steps: 3
-      log_every_steps: 200
+      log_every_steps: 100
   Stabilize:
     transitions:
       Passive: LT + B.on_pressed
