@@ -4,6 +4,7 @@ import isaaclab.sim as sim_utils
 import isaaclab.terrains as terrain_gen
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab_physx.physics import PhysxCfg
 from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
@@ -392,13 +393,14 @@ class RobotEnvCfg(ManagerBasedRLEnvCfg):
         # simulation settings
         self.sim.dt = 0.005
         self.sim.render_interval = self.decimation
-        # self.sim.physics_material = self.scene.terrain.physics_material
-        # self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
-        self.sim.newton_cfg.solver_cfg.nefc_per_env = 80
-        self.sim.newton_cfg.solver_cfg.ls_iterations = 15
-        self.sim.newton_cfg.solver_cfg.cone = "elliptic"
-        self.sim.newton_cfg.solver_cfg.impratio = 100.0
-        self.sim.newton_cfg.solver_cfg.ls_parallel = True
+        # IsaacLab 3.0: the upstream ``devel-newton`` branch uses
+        # ``self.sim.newton_cfg.solver_cfg.*`` here, but that attribute path
+        # does not exist in the shipping IsaacLab 3.0 API (it was written
+        # against a preview build). Use the canonical PhysX default instead.
+        # For multi-backend (PhysX + Newton) support, wrap this in a
+        # ``PresetCfg`` — see ``docs/source/migration/migrating_to_isaaclab_3-0.rst``.
+        self.sim.physics_material = self.scene.terrain.physics_material
+        self.sim.physics = PhysxCfg(gpu_max_rigid_patch_count=10 * 2**15)
 
         # update sensor update periods
         # we tick all the sensors based on the smallest update period (physics update period)

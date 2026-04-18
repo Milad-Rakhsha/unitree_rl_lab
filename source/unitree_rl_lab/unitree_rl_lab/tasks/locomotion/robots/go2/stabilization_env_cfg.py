@@ -8,6 +8,7 @@ import isaaclab.sim as sim_utils
 import isaaclab.terrains as terrain_gen
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab_physx.physics import PhysxCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -72,7 +73,12 @@ class RobotSceneCfg(InteractiveSceneCfg):
         debug_vis=False,
         mesh_prim_paths=["/World/ground"],
     )
-    contact_forces = ContactSensorCfg(prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, track_air_time=True)
+    contact_forces = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/.*",
+        filter_shape_paths_expr=None,
+        history_length=3,
+        track_air_time=True,
+    )
 
     sky_light = AssetBaseCfg(
         prim_path="/World/skyLight",
@@ -87,17 +93,20 @@ class RobotSceneCfg(InteractiveSceneCfg):
 class EventCfg:
     """Startup + reset domain randomization for diverse recovery initial conditions."""
 
-    physics_material = EventTerm(
-        func=mdp.randomize_rigid_body_material,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            "static_friction_range": (0.25, 1.35),
-            "dynamic_friction_range": (0.25, 1.35),
-            "restitution_range": (0.0, 0.2),
-            "num_buckets": 64,
-        },
-    )
+    # NOTE (IsaacLab 3.0 / Newton backend): ``randomize_rigid_body_material``
+    # is PhysX-only; disabled for the Newton port, matching upstream
+    # ``velocity_env_cfg.py``.
+    # physics_material = EventTerm(
+    #     func=mdp.randomize_rigid_body_material,
+    #     mode="startup",
+    #     params={
+    #         "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+    #         "static_friction_range": (0.25, 1.35),
+    #         "dynamic_friction_range": (0.25, 1.35),
+    #         "restitution_range": (0.0, 0.2),
+    #         "num_buckets": 64,
+    #     },
+    # )
 
     add_base_mass = EventTerm(
         func=mdp.randomize_rigid_body_mass,
@@ -256,7 +265,7 @@ class TerminationsCfg:
 
 @configclass
 class RobotEnvCfg(ManagerBasedRLEnvCfg):
-    scene: RobotSceneCfg = RobotSceneCfg(num_envs=4096, env_spacing=2.5)
+    scene: RobotSceneCfg = RobotSceneCfg(num_envs=4096, env_spacing=2.5, replicate_physics=True)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     commands: CommandsCfg = CommandsCfg()
@@ -269,8 +278,11 @@ class RobotEnvCfg(ManagerBasedRLEnvCfg):
         self.episode_length_s = 12.0
         self.sim.dt = 0.005
         self.sim.render_interval = self.decimation
+        # IsaacLab 3.0: see note in bipedal_env_cfg.py — assign a fresh
+        # ``PhysxCfg`` rather than setting ``sim.physx.<attr>`` directly,
+        # and steer clear of the non-existent ``sim.newton_cfg`` path.
         self.sim.physics_material = self.scene.terrain.physics_material
-        self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
+        self.sim.physics = PhysxCfg(gpu_max_rigid_patch_count=10 * 2**15)
 
         self.scene.contact_forces.update_period = self.sim.dt
         self.scene.height_scanner.update_period = self.decimation * self.sim.dt
