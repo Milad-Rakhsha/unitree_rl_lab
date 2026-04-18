@@ -12,46 +12,57 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import ContactSensorCfg
+from isaaclab.sensors import ContactSensorCfg#, RayCasterCfg, patterns
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
-from unitree_rl_lab.assets.robots.unitree import UNITREE_GO2_CFG as ROBOT_CFG
+from unitree_rl_lab.assets.robots.unitree import UNITREE_GO2_CFG
 from unitree_rl_lab.tasks.locomotion import mdp
 
-# Mixed mild outdoor terrain: friction + unevenness DR handles sticky floors; slopes/roughness
-# approximate slight tilt and bumps without full IsaacLab "rough" stairs (lighter on sim cost).
-GO2_VELOCITY_TERRAIN_CFG = terrain_gen.TerrainGeneratorCfg(
-    size=(8.0, 8.0),
-    border_width=20.0,
-    num_rows=10,
-    num_cols=20,
-    horizontal_scale=0.1,
-    vertical_scale=0.005,
-    slope_threshold=0.75,
-    difficulty_range=(0.0, 1.0),
-    use_cache=False,
-    sub_terrains={
-        "flat": terrain_gen.MeshPlaneTerrainCfg(proportion=0.30),
-        "random_rough": terrain_gen.HfRandomUniformTerrainCfg(
-            proportion=0.35, noise_range=(0.008, 0.05), noise_step=0.01, border_width=0.25
-        ),
-        "hf_pyramid_slope": terrain_gen.HfPyramidSlopedTerrainCfg(
-            proportion=0.125, slope_range=(0.0, 0.20), platform_width=2.0, border_width=0.25
-        ),
-        "hf_pyramid_slope_inv": terrain_gen.HfInvertedPyramidSlopedTerrainCfg(
-            proportion=0.125, slope_range=(0.0, 0.20), platform_width=2.0, border_width=0.25
-        ),
-        "boxes": terrain_gen.MeshRandomGridTerrainCfg(
-            proportion=0.10,
-            grid_width=0.45,
-            grid_height_range=(0.02, 0.09),
-            platform_width=2.0,
-        ),
-    },
-)
+# COBBLESTONE_ROAD_CFG = terrain_gen.TerrainGeneratorCfg(
+#     size=(8.0, 8.0),
+#     border_width=20.0,
+#     num_rows=10,
+#     num_cols=20,
+#     horizontal_scale=0.1,
+#     vertical_scale=0.005,
+#     slope_threshold=0.75,
+#     difficulty_range=(0.0, 1.0),
+#     use_cache=False,
+#     sub_terrains={
+#         "flat": terrain_gen.MeshPlaneTerrainCfg(proportion=0.1),
+#         # "random_rough": terrain_gen.HfRandomUniformTerrainCfg(
+#         #     proportion=0.1, noise_range=(0.01, 0.06), noise_step=0.01, border_width=0.25
+#         # ),
+#         # "hf_pyramid_slope": terrain_gen.HfPyramidSlopedTerrainCfg(
+#         #     proportion=0.1, slope_range=(0.0, 0.4), platform_width=2.0, border_width=0.25
+#         # ),
+#         # "hf_pyramid_slope_inv": terrain_gen.HfInvertedPyramidSlopedTerrainCfg(
+#         #     proportion=0.1, slope_range=(0.0, 0.4), platform_width=2.0, border_width=0.25
+#         # ),
+#         # "boxes": terrain_gen.MeshRandomGridTerrainCfg(
+#         #     proportion=0.2, grid_width=0.45, grid_height_range=(0.05, 0.2), platform_width=2.0
+#         # ),
+#         # "pyramid_stairs": terrain_gen.MeshPyramidStairsTerrainCfg(
+#         #     proportion=0.2,
+#         #     step_height_range=(0.05, 0.23),
+#         #     step_width=0.3,
+#         #     platform_width=3.0,
+#         #     border_width=1.0,
+#         #     holes=False,
+#         # ),
+#         # "pyramid_stairs_inv": terrain_gen.MeshInvertedPyramidStairsTerrainCfg(
+#         #     proportion=0.2,
+#         #     step_height_range=(0.05, 0.23),
+#         #     step_width=0.3,
+#         #     platform_width=3.0,
+#         #     border_width=1.0,
+#         #     holes=False,
+#         # ),
+#     },
+# )
 
 
 @configclass
@@ -61,14 +72,14 @@ class RobotSceneCfg(InteractiveSceneCfg):
     # ground terrain
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
-        terrain_type="generator",  # "plane", "generator"
-        terrain_generator=GO2_VELOCITY_TERRAIN_CFG,
-        max_init_terrain_level=5,
+        terrain_type="plane",  # "plane", "generator"
+        # terrain_generator=COBBLESTONE_ROAD_CFG,  # None, ROUGH_TERRAINS_CFG
+        max_init_terrain_level=1,
         collision_group=-1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
-            static_friction=1.2,
+            static_friction=1.0,
             dynamic_friction=1.0,
         ),
         visual_material=sim_utils.MdlFileCfg(
@@ -79,11 +90,23 @@ class RobotSceneCfg(InteractiveSceneCfg):
         debug_vis=False,
     )
     # robots
-    robot: ArticulationCfg = ROBOT_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+    robot: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
-    # Explicitly no height scan (not in policy/critic obs); avoids costly raycasts per step.
-    height_scanner = None
-    contact_forces = ContactSensorCfg(prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, track_air_time=True)
+    # sensors
+    # height_scanner = RayCasterCfg(
+    #     prim_path="{ENV_REGEX_NS}/Robot/base",
+    #     offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
+    #     attach_yaw_only=True,
+    #     pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[1.6, 1.0]),
+    #     debug_vis=False,
+    #     mesh_prim_paths=["/World/ground"],
+    # )
+    contact_forces = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/.*",
+        filter_shape_paths_expr=None,
+        history_length=3,
+        track_air_time=True
+    )
     # lights
     sky_light = AssetBaseCfg(
         prim_path="/World/skyLight",
@@ -99,18 +122,17 @@ class EventCfg:
     """Configuration for events."""
 
     # startup
-    physics_material = EventTerm(
-        func=mdp.randomize_rigid_body_material,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            # Skew high: real floors (rubber, grit) are often stickier than default USD friction
-            "static_friction_range": (0.7, 2.4),
-            "dynamic_friction_range": (0.6, 2.2),
-            "restitution_range": (0.0, 0.15),
-            "num_buckets": 64,
-        },
-    )
+    # physics_material = EventTerm(
+    #     func=mdp.randomize_rigid_body_material,
+    #     mode="startup",
+    #     params={
+    #         "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+    #         "static_friction_range": (0.3, 1.2),
+    #         "dynamic_friction_range": (0.3, 1.2),
+    #         "restitution_range": (0.0, 0.15),
+    #         "num_buckets": 64,
+    #     },
+    # )
 
     add_base_mass = EventTerm(
         func=mdp.randomize_rigid_body_mass,
@@ -137,14 +159,7 @@ class EventCfg:
         func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
-            "pose_range": {
-                "x": (-0.5, 0.5),
-                "y": (-0.5, 0.5),
-                "yaw": (-3.14, 3.14),
-                # Slight tilt at spawn (complements slope / uneven terrain)
-                "roll": (-0.14, 0.14),
-                "pitch": (-0.14, 0.14),
-            },
+            "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-3.14, 3.14)},
             "velocity_range": {
                 "x": (0.0, 0.0),
                 "y": (0.0, 0.0),
@@ -277,8 +292,8 @@ class RewardsCfg:
     dof_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=-10.0)
     energy = RewTerm(func=mdp.energy, weight=-2e-5)
 
-    # -- robot (softer than world-"flat": lets policy lean on slopes / uneven ground)
-    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-1.2)
+    # -- robot
+    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-2.5)
 
     joint_pos = RewTerm(
         func=mdp.joint_position_penalty,
@@ -349,7 +364,7 @@ class TerminationsCfg:
 class CurriculumCfg:
     """Curriculum terms for the MDP."""
 
-    terrain_levels = CurrTerm(func=mdp.terrain_levels_vel)
+    # terrain_levels = CurrTerm(func=mdp.terrain_levels_vel)
     lin_vel_cmd_levels = CurrTerm(mdp.lin_vel_cmd_levels)
 
 
@@ -358,7 +373,7 @@ class RobotEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for the locomotion velocity-tracking environment."""
 
     # Scene settings
-    scene: RobotSceneCfg = RobotSceneCfg(num_envs=4096, env_spacing=2.5)
+    scene: RobotSceneCfg = RobotSceneCfg(num_envs=4096, env_spacing=2.5, replicate_physics=True)
     # Basic settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
@@ -377,44 +392,27 @@ class RobotEnvCfg(ManagerBasedRLEnvCfg):
         # simulation settings
         self.sim.dt = 0.005
         self.sim.render_interval = self.decimation
-        self.sim.physics_material = self.scene.terrain.physics_material
-        self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
+        # self.sim.physics_material = self.scene.terrain.physics_material
+        # self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
+        self.sim.newton_cfg.solver_cfg.nefc_per_env = 80
+        self.sim.newton_cfg.solver_cfg.ls_iterations = 15
+        self.sim.newton_cfg.solver_cfg.cone = "elliptic"
+        self.sim.newton_cfg.solver_cfg.impratio = 100.0
+        self.sim.newton_cfg.solver_cfg.ls_parallel = True
 
         # update sensor update periods
+        # we tick all the sensors based on the smallest update period (physics update period)
         self.scene.contact_forces.update_period = self.sim.dt
-        if self.scene.height_scanner is not None:
-            self.scene.height_scanner.update_period = self.decimation * self.sim.dt
+        # self.scene.height_scanner.update_period = self.decimation * self.sim.dt
 
         # check if terrain levels curriculum is enabled - if so, enable curriculum for terrain generator
         # this generates terrains with increasing difficulty and is useful for training
-        if getattr(self.curriculum, "terrain_levels", None) is not None:
-            if self.scene.terrain.terrain_generator is not None:
-                self.scene.terrain.terrain_generator.curriculum = True
-        else:
-            if self.scene.terrain.terrain_generator is not None:
-                self.scene.terrain.terrain_generator.curriculum = False
-
-
-@configclass
-class RobotFlatEnvCfg(RobotEnvCfg):
-    """Infinite plane only — closest to IsaacLab `UnitreeGo2FlatEnvCfg`; much faster steps (no terrain gen, no height rays)."""
-
-    def __post_init__(self):
-        self.scene.terrain.terrain_type = "plane"
-        self.scene.terrain.terrain_generator = None
-        self.curriculum.terrain_levels = None
-        super().__post_init__()
-
-
-@configclass
-class RobotFlatPlayEnvCfg(RobotFlatEnvCfg):
-    def __post_init__(self):
-        super().__post_init__()
-        self.scene.num_envs = 32
-        self.observations.policy.enable_corruption = False
-        self.events.base_external_force_torque = None
-        self.events.push_robot = None
-        self.commands.base_velocity.ranges = self.commands.base_velocity.limit_ranges
+        # if getattr(self.curriculum, "terrain_levels", None) is not None:
+        #     if self.scene.terrain.terrain_generator is not None:
+        #         self.scene.terrain.terrain_generator.curriculum = True
+        # else:
+        #     if self.scene.terrain.terrain_generator is not None:
+        #         self.scene.terrain.terrain_generator.curriculum = False
 
 
 @configclass
@@ -422,6 +420,6 @@ class RobotPlayEnvCfg(RobotEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.scene.num_envs = 32
-        self.scene.terrain.terrain_generator.num_rows = 2
-        self.scene.terrain.terrain_generator.num_cols = 1
+        # self.scene.terrain.terrain_generator.num_rows = 2
+        # self.scene.terrain.terrain_generator.num_cols = 1
         self.commands.base_velocity.ranges = self.commands.base_velocity.limit_ranges
