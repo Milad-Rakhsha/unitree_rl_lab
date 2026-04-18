@@ -29,6 +29,7 @@ import isaaclab.sim as sim_utils
 import isaaclab.terrains as terrain_gen
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab_physx.physics import PhysxCfg
 from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
@@ -169,7 +170,12 @@ class RobotSceneCfg(InteractiveSceneCfg):
     robot: ArticulationCfg = ROBOT_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
     height_scanner = None
-    contact_forces = ContactSensorCfg(prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, track_air_time=True)
+    contact_forces = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/.*",
+        filter_shape_paths_expr=None,
+        history_length=3,
+        track_air_time=True,
+    )
 
     sky_light = AssetBaseCfg(
         prim_path="/World/skyLight",
@@ -190,17 +196,24 @@ class EventCfg:
     selected.
     """
 
-    physics_material = EventTerm(
-        func=mdp.randomize_rigid_body_material,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            "static_friction_range": (0.7, 1.8),
-            "dynamic_friction_range": (0.6, 1.6),
-            "restitution_range": (0.0, 0.15),
-            "num_buckets": 64,
-        },
-    )
+    # NOTE (IsaacLab 3.0 / Newton backend): ``randomize_rigid_body_material``
+    # is PhysX-only and is not supported by the Newton solver. Upstream
+    # ``velocity_env_cfg.py`` comments this out for the Newton port rather
+    # than gating it behind a ``PresetCfg``. We do the same here so the
+    # environment boots on both backends; if we later want PhysX-specific
+    # material DR, wrap this term in a ``PresetCfg`` as documented in
+    # ``docs/source/migration/migrating_to_isaaclab_3-0.rst`` (PresetCfg).
+    # physics_material = EventTerm(
+    #     func=mdp.randomize_rigid_body_material,
+    #     mode="startup",
+    #     params={
+    #         "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+    #         "static_friction_range": (0.7, 1.8),
+    #         "dynamic_friction_range": (0.6, 1.6),
+    #         "restitution_range": (0.0, 0.15),
+    #         "num_buckets": 64,
+    #     },
+    # )
 
     add_base_mass = EventTerm(
         func=mdp.randomize_rigid_body_mass,
@@ -532,7 +545,7 @@ class RobotBipedalEnvCfg(ManagerBasedRLEnvCfg):
     flat_init: bool = False
     only_positive_rewards: bool = False
 
-    scene: RobotSceneCfg = RobotSceneCfg(num_envs=4096, env_spacing=2.5)
+    scene: RobotSceneCfg = RobotSceneCfg(num_envs=4096, env_spacing=2.5, replicate_physics=True)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     commands: CommandsCfg = CommandsCfg()
@@ -557,8 +570,19 @@ class RobotBipedalEnvCfg(ManagerBasedRLEnvCfg):
         # simulation settings
         self.sim.dt = 0.005
         self.sim.render_interval = self.decimation
+        # IsaacLab 3.0: ``sim.physx.<attr>`` setters no longer exist because
+        # ``SimulationCfg.physics`` defaults to ``None``. Assign a new
+        # :class:`PhysxCfg` instance instead. ``sim.physics_material`` is
+        # still a plain field on ``SimulationCfg`` and keeps its old semantics.
+        # NOTE: we deliberately do *not* use the ``self.sim.newton_cfg.*``
+        # pattern found on the upstream ``devel-newton`` branch — that
+        # attribute path does not exist in the shipping IsaacLab 3.0 API and
+        # was written against a preview build. See
+        # ``docs/source/migration/migrating_to_isaaclab_3-0.rst`` for the
+        # ``PresetCfg`` pattern to follow if multi-backend (PhysX + Newton)
+        # is required.
         self.sim.physics_material = self.scene.terrain.physics_material
-        self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
+        self.sim.physics = PhysxCfg(gpu_max_rigid_patch_count=10 * 2**15)
 
         # update sensor update periods
         self.scene.contact_forces.update_period = self.sim.dt

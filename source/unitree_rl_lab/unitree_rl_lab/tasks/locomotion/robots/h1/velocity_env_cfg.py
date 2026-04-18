@@ -4,6 +4,7 @@ import isaaclab.sim as sim_utils
 import isaaclab.terrains as terrain_gen
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab_physx.physics import PhysxCfg
 from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
@@ -394,13 +395,11 @@ class RobotEnvCfg(ManagerBasedRLEnvCfg):
         # simulation settings
         self.sim.dt = 0.005
         self.sim.render_interval = self.decimation
-        # self.sim.physics_material = self.scene.terrain.physics_material
-        # self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
-        self.sim.newton_cfg.solver_cfg.nefc_per_env = 80
-        self.sim.newton_cfg.solver_cfg.ls_iterations = 15
-        self.sim.newton_cfg.solver_cfg.cone = "elliptic"
-        self.sim.newton_cfg.solver_cfg.impratio = 100.0
-        self.sim.newton_cfg.solver_cfg.ls_parallel = True
+        # IsaacLab 3.0: use canonical ``sim.physics = PhysxCfg(...)`` — the
+        # ``sim.newton_cfg.*`` pattern on upstream ``devel-newton`` does not
+        # exist in the shipping 3.0 API. See go2/velocity_env_cfg.py.
+        self.sim.physics_material = self.scene.terrain.physics_material
+        self.sim.physics = PhysxCfg(gpu_max_rigid_patch_count=10 * 2**15)
 
         # --- Robot Cfg ---
         self.gait_f = 2.0
