@@ -2,6 +2,7 @@
 #include "unitree_articulation.h"
 #include "isaaclab/envs/mdp/observations/observations.h"
 #include "isaaclab/envs/mdp/actions/joint_actions.h"
+#include "LinearInterpolator.h"
 #include <unitree/common/time/time_tool.hpp>
 #include <cmath>
 
@@ -25,28 +26,43 @@ State_RLBase::State_RLBase(int state_mode, std::string state_string)
     );
     env->alg = std::make_unique<isaaclab::OrtRunner>(policy_dir / "exported" / "policy.onnx");
 
-    parse_surprise_cfg(cfg);
+    // Resolve the surprise-trip target FSM. Priority:
+    //   1. ``surprise.target_fsm`` in this state's config (explicit).
+    //   2. "Stabilize" if it exists.
+    //   3. "FixStand" as a last-resort fallback.
+    if (cfg["surprise"] && cfg["surprise"]["target_fsm"])
+    {
+        surprise_target_fsm_ = cfg["surprise"]["target_fsm"].as<std::string>();
+    }
+    else if (FSMStringMap.right.count("Stabilize"))
+    {
+        surprise_target_fsm_ = "Stabilize";
+    }
+    else if (FSMStringMap.right.count("FixStand"))
+    {
+        surprise_target_fsm_ = "FixStand";
+    }
 
+    parse_surprise_cfg(cfg);
+    parse_intro_cfg(cfg);
+    parse_auto_transition_cfg(cfg);
+
+    // Auto-fall safety: if the body tilts past ``bad_orientation_limit`` rad
+    // from its nominal orientation, drop straight to Passive. Bipedal states
+    // need a larger limit (their baseline is already ~pi/2 off level).
+    const float bad_orientation_limit = cfg["bad_orientation_limit"].as<float>(1.0f);
     this->registered_checks.emplace_back(
         std::make_pair(
-            [&]()->bool{ return isaaclab::mdp::bad_orientation(env.get(), 1.0); },
+            [this, bad_orientation_limit]()->bool{
+                return isaaclab::mdp::bad_orientation(env.get(), bad_orientation_limit);
+            },
             FSMStringMap.right.at("Passive")
         )
     );
 
-    int surprise_target_fsm = 0;
-    if (FSMStringMap.right.count("Stabilize"))
+    if (!surprise_target_fsm_.empty() && FSMStringMap.right.count(surprise_target_fsm_))
     {
-        surprise_target_fsm = FSMStringMap.right.at("Stabilize");
-    }
-    else if (FSMStringMap.right.count("FixStand"))
-    {
-        surprise_target_fsm = FSMStringMap.right.at("FixStand");
-        spdlog::info("Surprise fallback: Stabilize FSM not found; using FixStand.");
-    }
-
-    if (surprise_target_fsm != 0)
-    {
+        const int surprise_target_fsm = FSMStringMap.right.at(surprise_target_fsm_);
         this->registered_checks.emplace_back(
             std::make_pair(
                 [&]()->bool{ return surprise_trip_check(); },
@@ -54,44 +70,147 @@ State_RLBase::State_RLBase(int state_mode, std::string state_string)
             )
         );
     }
-    else
+    else if (!surprise_target_fsm_.empty())
     {
-        spdlog::warn("Surprise enabled but neither Stabilize nor FixStand FSM exists; surprise transition disabled.");
+        spdlog::warn(
+            "Surprise target FSM '{}' not found; surprise transition disabled for state '{}'.",
+            surprise_target_fsm_,
+            state_string
+        );
     }
 
-    if (state_string == "Stabilize")
+    if (auto_transition_enabled_ && FSMStringMap.right.count(auto_transition_target_))
     {
-        auto stab_cfg = cfg["auto_velocity"];
-        if (stab_cfg && stab_cfg["enabled"].as<bool>(false))
+        const int target_id = FSMStringMap.right.at(auto_transition_target_);
+        registered_checks.emplace_back(
+            std::make_pair(
+                [this]() -> bool {
+                    if (!auto_transition_enabled_ || state_enter_wall_time_s_ <= 0.0)
+                    {
+                        return false;
+                    }
+                    // Don't auto-transition while the intro phase is still playing.
+                    if (intro_running.load())
+                    {
+                        return false;
+                    }
+                    const double now = static_cast<double>(unitree::common::GetCurrentTimeMillisecond()) * 1e-3;
+                    return (now - state_enter_wall_time_s_) >= static_cast<double>(auto_transition_duration_s_);
+                },
+                target_id
+            )
+        );
+        spdlog::info(
+            "State '{}' will auto-transition to '{}' after {:.2f} s (wall clock).",
+            state_string,
+            auto_transition_target_,
+            auto_transition_duration_s_
+        );
+    }
+    else if (auto_transition_enabled_)
+    {
+        spdlog::warn(
+            "State '{}' auto_transition target '{}' not found; disabled.",
+            state_string,
+            auto_transition_target_
+        );
+        auto_transition_enabled_ = false;
+    }
+}
+
+void State_RLBase::parse_intro_cfg(const YAML::Node& cfg)
+{
+    if (!cfg["intro"])
+    {
+        return;
+    }
+
+    try
+    {
+        ts_intro = cfg["intro"]["ts"].as<std::vector<float>>();
+        qs_intro = cfg["intro"]["qs"].as<std::vector<std::vector<float>>>();
+    }
+    catch (const std::exception& e)
+    {
+        spdlog::error("Failed to parse 'intro' keyframes for state '{}': {}", getStateString(), e.what());
+        ts_intro.clear();
+        qs_intro.clear();
+        return;
+    }
+
+    if (ts_intro.size() < 2 || ts_intro.size() != qs_intro.size())
+    {
+        spdlog::error(
+            "State '{}' intro config invalid: ts.size()={}, qs.size()={} (need >=2 and equal).",
+            getStateString(),
+            ts_intro.size(),
+            qs_intro.size()
+        );
+        ts_intro.clear();
+        qs_intro.clear();
+        return;
+    }
+
+    // An empty first keyframe is a sentinel: ``enter()`` will pin it to the
+    // currently commanded joint state so the intro starts from wherever the
+    // previous FSM left off. All other keyframes must be fully specified.
+    const size_t joint_count = env->robot->data.joint_stiffness.size();
+    if (qs_intro.front().empty())
+    {
+        qs_intro.front().assign(joint_count, 0.0f);
+    }
+    for (size_t i = 0; i < qs_intro.size(); ++i)
+    {
+        if (qs_intro[i].size() != joint_count)
         {
-            stabilize_auto_velocity_enabled_ = true;
-            stabilize_auto_velocity_duration_s_ = stab_cfg["duration_s"].as<float>(stabilize_auto_velocity_duration_s_);
-            if (FSMStringMap.right.count("Velocity"))
-            {
-                registered_checks.emplace_back(
-                    std::make_pair(
-                        [this]() -> bool {
-                            if (!stabilize_auto_velocity_enabled_ || stabilize_enter_wall_time_s_ <= 0.0)
-                            {
-                                return false;
-                            }
-                            const double now = static_cast<double>(unitree::common::GetCurrentTimeMillisecond()) * 1e-3;
-                            return (now - stabilize_enter_wall_time_s_) >= static_cast<double>(stabilize_auto_velocity_duration_s_);
-                        },
-                        FSMStringMap.right.at("Velocity")
-                    )
-                );
-                spdlog::info(
-                    "Stabilize auto-return to Velocity after {:.2f} s (wall clock).",
-                    stabilize_auto_velocity_duration_s_
-                );
-            }
-            else
-            {
-                spdlog::warn("Stabilize.auto_velocity enabled but Velocity FSM not found.");
-            }
+            spdlog::error(
+                "State '{}' intro keyframe {} has {} joints (expected {}).",
+                getStateString(),
+                i,
+                qs_intro[i].size(),
+                joint_count
+            );
+            ts_intro.clear();
+            qs_intro.clear();
+            return;
         }
     }
+
+    if (cfg["intro"]["kp"]) intro_kp = cfg["intro"]["kp"].as<std::vector<float>>();
+    if (cfg["intro"]["kd"]) intro_kd = cfg["intro"]["kd"].as<std::vector<float>>();
+
+    spdlog::info(
+        "State '{}' intro enabled: {} keyframes, duration {:.2f}s (custom kp: {}, custom kd: {}).",
+        getStateString(),
+        ts_intro.size(),
+        ts_intro.back() - ts_intro.front(),
+        !intro_kp.empty(),
+        !intro_kd.empty()
+    );
+}
+
+void State_RLBase::parse_auto_transition_cfg(const YAML::Node& cfg)
+{
+    if (!cfg["auto_transition"] || !cfg["auto_transition"]["enabled"].as<bool>(false))
+    {
+        return;
+    }
+
+    auto node = cfg["auto_transition"];
+    if (!node["target_fsm"])
+    {
+        spdlog::warn("State '{}' auto_transition missing 'target_fsm'.", getStateString());
+        return;
+    }
+
+    auto_transition_enabled_ = true;
+    auto_transition_target_ = node["target_fsm"].as<std::string>();
+    auto_transition_duration_s_ = node["duration_s"].as<float>(4.0f);
+}
+
+bool State_RLBase::intro_active() const
+{
+    return intro_running.load();
 }
 
 void State_RLBase::enter()
@@ -102,19 +221,36 @@ void State_RLBase::enter()
     surprise_step_count = 0;
     has_prev_transition = false;
 
-    if (getStateString() == "Stabilize" && stabilize_auto_velocity_enabled_)
+    state_enter_wall_time_s_ = static_cast<double>(unitree::common::GetCurrentTimeMillisecond()) * 1e-3;
+
+    const size_t joint_count = env->robot->data.joint_stiffness.size();
+    const bool has_intro = !ts_intro.empty() && !qs_intro.empty();
+
+    // Pin the first intro keyframe to the currently-commanded joint state so
+    // the interpolation starts smoothly from wherever the previous FSM left off.
+    if (has_intro)
     {
-        stabilize_enter_wall_time_s_ = static_cast<double>(unitree::common::GetCurrentTimeMillisecond()) * 1e-3;
-    }
-    else
-    {
-        stabilize_enter_wall_time_s_ = 0.0;
+        std::vector<float> q0(joint_count);
+        for (size_t i = 0; i < joint_count; ++i)
+        {
+            q0[i] = lowcmd->msg_.motor_cmd()[i].q();
+        }
+        {
+            std::lock_guard<std::mutex> lock(intro_mutex);
+            qs_intro[0] = q0;
+        }
+        intro_t0_s = state_enter_wall_time_s_;
+        intro_running.store(true);
     }
 
-    for (int i = 0; i < env->robot->data.joint_stiffness.size(); ++i)
+    for (size_t i = 0; i < joint_count; ++i)
     {
-        lowcmd->msg_.motor_cmd()[i].kp() = env->robot->data.joint_stiffness[i];
-        lowcmd->msg_.motor_cmd()[i].kd() = env->robot->data.joint_damping[i];
+        const bool intro_kp_valid = has_intro && !intro_kp.empty() && i < intro_kp.size();
+        const bool intro_kd_valid = has_intro && !intro_kd.empty() && i < intro_kd.size();
+        lowcmd->msg_.motor_cmd()[i].kp() =
+            intro_kp_valid ? intro_kp[i] : env->robot->data.joint_stiffness[i];
+        lowcmd->msg_.motor_cmd()[i].kd() =
+            intro_kd_valid ? intro_kd[i] : env->robot->data.joint_damping[i];
         lowcmd->msg_.motor_cmd()[i].dq() = 0;
         lowcmd->msg_.motor_cmd()[i].tau() = 0;
     }
@@ -124,6 +260,22 @@ void State_RLBase::enter()
     policy_thread = std::thread([this] { this->policy_loop(); });
 }
 
+std::vector<float> State_RLBase::intro_current_q()
+{
+    std::lock_guard<std::mutex> lock(intro_mutex);
+    const double now = static_cast<double>(unitree::common::GetCurrentTimeMillisecond()) * 1e-3;
+    const float t = static_cast<float>(now - intro_t0_s);
+    if (ts_intro.empty() || qs_intro.empty())
+    {
+        return {};
+    }
+    if (t >= ts_intro.back())
+    {
+        intro_running.store(false);
+    }
+    return linear_interpolate(t, ts_intro, qs_intro);
+}
+
 void State_RLBase::exit()
 {
     policy_thread_running.store(false);
@@ -131,6 +283,8 @@ void State_RLBase::exit()
     {
         policy_thread.join();
     }
+    intro_running.store(false);
+    state_enter_wall_time_s_ = 0.0;
 }
 
 void State_RLBase::policy_loop()
@@ -142,6 +296,9 @@ void State_RLBase::policy_loop()
 
     env->reset();
     latest_action.assign(env->action_manager->total_action_dim(), 0.0f);
+
+    bool intro_kp_applied = !intro_kp.empty() || !intro_kd.empty();
+    bool had_intro = !ts_intro.empty();
 
     while (policy_thread_running.load())
     {
@@ -159,6 +316,18 @@ void State_RLBase::policy_loop()
         if (surprise_enabled.load() && obs_map.count("obs"))
         {
             update_surprise_gate(obs_map.at("obs"), action);
+        }
+
+        // Once the intro phase finishes, restore the policy's native gains.
+        if (had_intro && intro_kp_applied && !intro_running.load())
+        {
+            for (size_t i = 0; i < env->robot->data.joint_stiffness.size(); ++i)
+            {
+                lowcmd->msg_.motor_cmd()[i].kp() = env->robot->data.joint_stiffness[i];
+                lowcmd->msg_.motor_cmd()[i].kd() = env->robot->data.joint_damping[i];
+            }
+            intro_kp_applied = false;
+            spdlog::info("State '{}' intro complete; policy now in control.", getStateString());
         }
 
         std::this_thread::sleep_until(sleep_till);
@@ -447,6 +616,21 @@ bool State_RLBase::surprise_trip_check()
 
 void State_RLBase::run()
 {
+    // During the intro phase, command joints directly from the interpolated
+    // keyframes (motor-index-ordered) and ignore the policy output.
+    if (intro_running.load())
+    {
+        const auto q = intro_current_q();
+        if (!q.empty())
+        {
+            for (size_t i = 0; i < q.size(); ++i)
+            {
+                lowcmd->msg_.motor_cmd()[i].q() = q[i];
+            }
+            return;
+        }
+    }
+
     std::vector<float> action;
     {
         std::lock_guard<std::mutex> lock(action_mutex);
