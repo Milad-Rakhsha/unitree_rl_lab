@@ -22,9 +22,13 @@ public:
     {
         auto fsms = cfg["_"]; // enabled FSMs
 
-        // register FSM string map; used for state transition
+        // register FSM string map; used for state transition. An entry with
+        // ``enabled: false`` is declared but skipped — neither registered in
+        // the string map nor instantiated. Any transition targeting it will
+        // be logged as missing (harmless) by FSMState.
         for (auto it = fsms.begin(); it != fsms.end(); ++it)
         {
+            if (it->second["enabled"] && !it->second["enabled"].as<bool>()) continue;
             std::string fsm_name = it->first.as<std::string>();
             int id = it->second["id"].as<int>();
             FSMStringMap.insert({id, fsm_name});
@@ -33,6 +37,11 @@ public:
         // Initialize FSM states
         for (auto it = fsms.begin(); it != fsms.end(); ++it)
         {
+            if (it->second["enabled"] && !it->second["enabled"].as<bool>())
+            {
+                spdlog::info("FSM: '{}' is disabled in config; skipping.", it->first.as<std::string>());
+                continue;
+            }
             std::string fsm_name = it->first.as<std::string>();
             int id = it->second["id"].as<int>();
             std::string fsm_type = it->second["type"] ? it->second["type"].as<std::string>() : fsm_name;

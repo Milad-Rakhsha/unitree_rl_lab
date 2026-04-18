@@ -26,6 +26,11 @@ private:
     void update_surprise_gate(const std::vector<float>& obs, const std::vector<float>& action);
     bool surprise_trip_check();
 
+    void parse_intro_cfg(const YAML::Node& cfg);
+    void parse_auto_transition_cfg(const YAML::Node& cfg);
+    bool intro_active() const;
+    std::vector<float> intro_current_q();
+
     std::unique_ptr<isaaclab::ManagerBasedRLEnv> env;
 
     std::thread policy_thread;
@@ -33,6 +38,26 @@ private:
 
     std::mutex action_mutex;
     std::vector<float> latest_action;
+
+    // Optional intro keyframe phase: on enter(), linearly interpolate joint
+    // positions through (ts_intro, qs_intro) before handing off to the learned
+    // policy. Useful to bring the robot from its current (e.g. FixStand) pose
+    // into a stance matching the policy's training distribution.
+    std::vector<float> ts_intro;
+    std::vector<std::vector<float>> qs_intro;
+    std::vector<float> intro_kp;
+    std::vector<float> intro_kd;
+    std::atomic<bool> intro_running{false};
+    double intro_t0_s = 0.0;
+    std::mutex intro_mutex;
+
+    // Generic auto-transition: after this state has been active for
+    // ``auto_transition_duration_s`` wall seconds, switch to the FSM named by
+    // ``auto_transition_target_``. Replaces the hardcoded Stabilize-only logic.
+    bool auto_transition_enabled_ = false;
+    std::string auto_transition_target_;
+    float auto_transition_duration_s_ = 0.0f;
+    double state_enter_wall_time_s_ = 0.0;
 
     std::atomic<bool> surprise_enabled{false};
     std::atomic<bool> surprise_trip{false};
@@ -54,6 +79,10 @@ private:
     std::vector<float> prev_action;
     bool has_prev_transition = false;
 
+    // Name of the FSM to switch to when surprise trips. Configurable per state
+    // via ``surprise.target_fsm``; falls back to "Stabilize" then "FixStand".
+    std::string surprise_target_fsm_;
+
     Ort::Env surprise_ort_env{ORT_LOGGING_LEVEL_WARNING, "surprise_model"};
     Ort::SessionOptions surprise_session_options;
     std::unique_ptr<Ort::Session> surprise_session;
@@ -67,10 +96,6 @@ private:
     std::vector<int64_t> surprise_output_shape;
     std::vector<int64_t> surprise_output_shape_alt;
     bool surprise_outputs_single_tensor = false;
-
-    bool stabilize_auto_velocity_enabled_ = false;
-    float stabilize_auto_velocity_duration_s_ = 4.0f;
-    double stabilize_enter_wall_time_s_ = 0.0;
 };
 
 REGISTER_FSM(State_RLBase)
