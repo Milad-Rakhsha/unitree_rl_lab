@@ -8,6 +8,36 @@ from isaaclab.utils import class_to_dict
 from isaaclab.utils.string import resolve_matching_names
 
 
+def _to_numpy(x):
+    """Convert a torch.Tensor, warp.array, numpy.ndarray, or python scalar to numpy array."""
+    if hasattr(x, "detach"):  # torch.Tensor
+        return x.detach().cpu().numpy()
+    if hasattr(x, "numpy"):  # warp.array
+        return x.numpy()
+    return np.asarray(x)
+
+
+def _actuator_joint_gains(asset) -> tuple[np.ndarray, np.ndarray]:
+    """Return articulation-wide (stiffness, damping) in ``asset.data.joint_names`` order.
+
+    Isaac Lab 3.0 deprecated ``asset.data.default_joint_stiffness``; with the Newton backend
+    ``asset.data.joint_stiffness`` is not populated (actuator torque is applied externally),
+    so reading it yields zeros. The ground-truth PD gains live on the actuator objects.
+    """
+    num_joints = len(asset.data.joint_names)
+    stiffness = np.zeros(num_joints, dtype=np.float32)
+    damping = np.zeros(num_joints, dtype=np.float32)
+    for actuator in asset.actuators.values():
+        joint_ids = actuator.joint_indices
+        if isinstance(joint_ids, slice):
+            joint_ids = list(range(*joint_ids.indices(num_joints)))
+        kp = _to_numpy(actuator.stiffness)[0]
+        kd = _to_numpy(actuator.damping)[0]
+        stiffness[joint_ids] = kp
+        damping[joint_ids] = kd
+    return stiffness, damping
+
+
 def format_value(x):
     if isinstance(x, float):
         return float(f"{x:.3g}")
@@ -27,13 +57,21 @@ def export_deploy_cfg(env: ManagerBasedRLEnv, log_dir):
     cfg = {}  # noqa: SIM904
     cfg["joint_ids_map"] = joint_ids_map
     cfg["step_dt"] = env.cfg.sim.dt * env.cfg.decimation
+
+    actuator_stiffness, actuator_damping = _actuator_joint_gains(asset)
     stiffness = np.zeros(len(joint_sdk_names))
-    stiffness[joint_ids_map] = asset.data.default_joint_stiffness[0].detach().cpu().numpy().tolist()
+    stiffness[joint_ids_map] = actuator_stiffness
     cfg["stiffness"] = stiffness.tolist()
     damping = np.zeros(len(joint_sdk_names))
-    damping[joint_ids_map] = asset.data.default_joint_damping[0].detach().cpu().numpy().tolist()
+    damping[joint_ids_map] = actuator_damping
     cfg["damping"] = damping.tolist()
-    cfg["default_joint_pos"] = asset.data.default_joint_pos[0].detach().cpu().numpy().tolist()
+    if not np.any(stiffness) or not np.any(damping):
+        raise RuntimeError(
+            "export_deploy_cfg: resolved actuator stiffness/damping are all zero. "
+            "Check the robot's ActuatorCfg (stiffness/damping) before exporting."
+        )
+
+    cfg["default_joint_pos"] = _to_numpy(asset.data.default_joint_pos)[0].tolist()
 
     # --- commands ---
     cfg["commands"] = {}
@@ -56,14 +94,14 @@ def export_deploy_cfg(env: ManagerBasedRLEnv, log_dir):
         if isinstance(term_cfg.scale, float):
             term_cfg.scale = [term_cfg.scale for _ in range(action_term.action_dim)]
         else:  # dict
-            term_cfg.scale = action_term._scale[0].detach().cpu().numpy().tolist()
+            term_cfg.scale = _to_numpy(action_term._scale)[0].tolist()
 
         if term_cfg.clip is not None:
-            term_cfg.clip = action_term._clip[0].detach().cpu().numpy().tolist()
+            term_cfg.clip = _to_numpy(action_term._clip)[0].tolist()
 
         if action_name in ["JointPositionAction", "JointVelocityAction"]:
             if term_cfg.use_default_offset:
-                term_cfg.offset = action_term._offset[0].detach().cpu().numpy().tolist()
+                term_cfg.offset = _to_numpy(action_term._offset)[0].tolist()
             else:
                 term_cfg.offset = [0.0 for _ in range(action_term.action_dim)]
 
@@ -88,7 +126,7 @@ def export_deploy_cfg(env: ManagerBasedRLEnv, log_dir):
         obs_dims = tuple(obs_cfg.func(env, **obs_cfg.params).shape)
         term_cfg = obs_cfg.copy()
         if term_cfg.scale is not None:
-            scale = term_cfg.scale.detach().cpu().numpy().tolist()
+            scale = _to_numpy(term_cfg.scale).tolist()
             if isinstance(scale, float):
                 term_cfg.scale = [scale for _ in range(obs_dims[1])]
             else:

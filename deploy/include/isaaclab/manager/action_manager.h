@@ -1,6 +1,9 @@
 // Copyright (c) 2025, Unitree Robotics Co., Ltd.
 // All rights reserved.
 
+// Dispatches raw policy output to action terms and returns processed joint
+// targets; REGISTER_ACTION registers a term type by string name.
+
 #pragma once
 
 #include "isaaclab/envs/manager_based_rl_env.h"

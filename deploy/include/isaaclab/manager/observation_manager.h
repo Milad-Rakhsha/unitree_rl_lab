@@ -1,6 +1,9 @@
 // Copyright (c) 2025, Unitree Robotics Co., Ltd.
 // All rights reserved.
 
+// Builds observation vectors from deploy.yaml observation terms; the
+// REGISTER_OBSERVATION macro registers a named term with observations_map().
+
 #pragma once
 
 #include <eigen3/Eigen/Dense>

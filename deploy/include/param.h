@@ -1,6 +1,9 @@
 // Copyright (c) 2025, Unitree Robotics Co., Ltd.
 // All rights reserved.
 
+// Global paths, loaded config.yaml, logging setup, CLI parsing, and policy_dir
+// resolution relative to the project directory.
+
 #pragma once
 
 #include <stdint.h>

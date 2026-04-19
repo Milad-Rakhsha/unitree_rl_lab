@@ -1,3 +1,6 @@
+// Mimic / motion-tracking FSM state: RL env plus motion loader for reference
+// trajectories (distinct from generic State_RLBase).
+
 #pragma once
 
 #include "FSM/State_RLBase.h"

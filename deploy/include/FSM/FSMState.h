@@ -1,3 +1,6 @@
+// FSM state with DDS command/state handles, joystick transition parsing from
+// YAML, and post_run publishing. Static lowcmd/lowstate must be set before use.
+
 #pragma once
 
 #include "Types.h"
@@ -53,13 +56,13 @@ public:
         );
     }
 
-    void pre_run()
+    void pre_run() override
     {
         lowstate->update();
         if(keyboard) keyboard->update();
     }
 
-    void post_run()
+    void post_run() override
     {
         lowcmd->unlockAndPublish();
     }

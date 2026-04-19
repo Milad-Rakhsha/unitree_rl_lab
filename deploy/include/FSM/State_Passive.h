@@ -1,6 +1,9 @@
 // Copyright (c) 2025, Unitree Robotics Co., Ltd.
 // All rights reserved.
 
+// Damped pass-through: tracks measured q with configurable kd and optional
+// motor mode from YAML.
+
 #pragma once
 
 #include "FSMState.h"

@@ -1,6 +1,9 @@
 // Copyright (c) 2025, Unitree Robotics Co., Ltd.
 // All rights reserved.
 
+// Robot state container (IMU, joints, gains) and Articulation base with
+// virtual update(); hardware uses unitree::BaseArticulation.
+
 #pragma once
 
 #include <eigen3/Eigen/Dense>

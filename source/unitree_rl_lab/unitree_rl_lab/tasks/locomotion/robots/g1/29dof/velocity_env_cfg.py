@@ -17,7 +17,7 @@ from isaaclab.sensors import ContactSensorCfg#, RayCasterCfg, patterns
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
-from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
+from isaaclab.utils.noise import UniformNoiseCfg as Unoise
 
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_CFG
 from unitree_rl_lab.tasks.locomotion import mdp
@@ -76,7 +76,6 @@ class RobotSceneCfg(InteractiveSceneCfg):
     # )
     contact_forces = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/.*",
-        filter_shape_paths_expr=None,
         history_length=3,
         track_air_time=True
     )

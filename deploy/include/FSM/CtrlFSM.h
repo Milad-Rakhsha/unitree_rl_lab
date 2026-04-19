@@ -1,6 +1,10 @@
 // Copyright (c) 2025, Unitree Robotics Co., Ltd.
 // All rights reserved.
 
+// Finite-state machine runner: loads state objects from config, executes
+// pre_run / run / post_run at fixed dt, evaluates transition predicates on the
+// active state, and switches states when a predicate returns true.
+
 #pragma once
 
 #include <unitree/common/thread/recurrent_thread.hpp>
@@ -20,12 +24,10 @@ public:
 
     CtrlFSM(YAML::Node cfg)
     {
-        auto fsms = cfg["_"]; // enabled FSMs
+        auto fsms = cfg["_"];
 
-        // register FSM string map; used for state transition. An entry with
-        // ``enabled: false`` is declared but skipped — neither registered in
-        // the string map nor instantiated. Any transition targeting it will
-        // be logged as missing (harmless) by FSMState.
+        // Build id<->name map. Entries with enabled: false are skipped and not
+        // instantiated; transitions to missing names are warned in FSMState.
         for (auto it = fsms.begin(); it != fsms.end(); ++it)
         {
             if (it->second["enabled"] && !it->second["enabled"].as<bool>()) continue;

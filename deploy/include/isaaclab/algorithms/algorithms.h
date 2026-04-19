@@ -1,6 +1,9 @@
 // Copyright (c) 2025, Unitree Robotics Co., Ltd.
 // All rights reserved.
 
+// Policy interface and OrtRunner: maps observation tensors by name from the
+// ONNX model inputs to observation group vectors from deploy.yaml.
+
 #pragma once
 
 #include "onnxruntime_cxx_api.h"

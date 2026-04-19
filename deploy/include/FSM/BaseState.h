@@ -1,6 +1,10 @@
 // Copyright (c) 2025, Unitree Robotics Co., Ltd.
 // All rights reserved.
 
+// Base FSM state: numeric id, optional automatic transition predicates, and
+// a global id<->name map. Use REGISTER_FSM(Derived) once per concrete state
+// class so CtrlFSM can construct it by type string from YAML.
+
 #pragma once
 
 #include <boost/bimap.hpp>
@@ -42,6 +46,8 @@ inline FsmMap& getFsmMap() {
     return fsmMap;
 }
 
+// Registers Derived under the key "Derived" in getFsmMap(); CtrlFSM looks up
+// "State_" + YAML type (e.g. State_RLBase for type RLBase).
 #define REGISTER_FSM(Derived) \
     inline std::shared_ptr<BaseState> __factory_##Derived(int s, std::string ss) {      \
         return std::make_shared<Derived>(s, ss);                                        \
