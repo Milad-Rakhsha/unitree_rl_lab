@@ -1,6 +1,9 @@
 // Copyright (c) 2025, Unitree Robotics Co., Ltd.
 // All rights reserved.
 
+// Articulation implementation: fills ArticulationData from Unitree low-level
+// IMU and motor state using joint_ids_map for joint ordering.
+
 #pragma once
 
 #include "isaaclab/assets/articulation/articulation.h"

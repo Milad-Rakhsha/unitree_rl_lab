@@ -1,6 +1,8 @@
 // Copyright (c) 2025, Unitree Robotics Co., Ltd.
 // All rights reserved.
 
+// Default joint position / residual action term; REGISTER_ACTION(JointAction).
+
 #pragma once
 
 #include <eigen3/Eigen/Dense>

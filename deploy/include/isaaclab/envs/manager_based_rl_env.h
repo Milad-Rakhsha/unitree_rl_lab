@@ -1,6 +1,11 @@
 // Copyright (c) 2025, Unitree Robotics Co., Ltd.
 // All rights reserved.
 
+// Minimal RL environment: loads deploy.yaml, owns articulation and
+// observation/action managers, and runs policy step() for sim-style loops.
+// On hardware, State_RLBase uses observation_manager + alg + action_manager
+// from a dedicated thread instead of calling step() as a single loop.
+
 #pragma once
 
 #include <eigen3/Eigen/Dense>

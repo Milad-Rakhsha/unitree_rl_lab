@@ -1,6 +1,8 @@
 // Copyright (c) 2025, Unitree Robotics Co., Ltd.
 // All rights reserved.
 
+// Piecewise linear interpolation over time series ts and vector keyframes ys.
+
 #pragma once
 
 #include <vector>

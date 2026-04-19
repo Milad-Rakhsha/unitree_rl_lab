@@ -2,27 +2,43 @@
 # Go2 deployment FSM config
 # =============================================================================
 #
-# Joystick shortcuts (from FixStand — pick one to launch a walking policy):
+# Joystick shortcuts (from FixStand):
 #
-#   start                   -> Velocity          (plain quadruped walking, no surprise)
+#   start                   -> Velocity          (quadruped walking, no surprise)
 #   LB + start              -> VelocityGuarded   (quadruped walking + surprise-triggered stabilize)
 #   LB + up                 -> BipedalRear       (rear-legs stand-up walk, nose-up)
-#   LB + down               -> BipedalFront      (front-legs handstand walk, nose-down)
 #
 # Return shortcuts:
 #
 #   LT + A  (from any walking state) -> FixStand    (soft land, go back to default stand)
 #   LT + B  (from FixStand only)     -> Passive     (kill all torque, robot goes limp)
 #
-# Passive is *only* reachable from FixStand. If you need to kill torque while a
-# walking policy is active, press LT+A first to return to FixStand, then LT+B.
+# Passive is only reachable from FixStand. To kill torque while a walking
+# policy is active, press LT+A first to return to FixStand, then LT+B.
 #
 # Surprise-guarded walking auto-chain:
 #
 #   VelocityGuarded --(surprise trip)--> Stabilize --(auto, 0.5s)--> VelocityGuarded
 #
-# Plain `Velocity` has surprise disabled, so the only way out is an explicit
-# joystick input (LT+A / LT+B) or a fall termination.
+# Plain Velocity has surprise disabled, so the only exits are joystick
+# (LT+A / LT+B) or a fall termination.
+#
+# Each RL policy_dir must contain the artifacts from that training run:
+#   params/deploy.yaml   (from export_deploy_cfg / play export)
+#   exported/policy.onnx
+# If deploy.yaml or ONNX came from a different task or checkpoint, the robot
+# will usually collapse immediately. Re-export params/deploy.yaml after
+# Isaac Lab upgrades so joint_ids_map / observations match the current
+# training task.
+#
+# bad_orientation_limit (rad) is the deploy-side fall cut-off. For quadruped
+# policies this should match the training termination (e.g. rough_env_cfg
+# uses 1.2 rad); the C++ default (1.0) is stricter and can trip before the
+# policy recovers.
+#
+# Joystick axes feed ``velocity_commands`` in deploy; a drifting stick reads
+# as a non-zero command. Center the sticks (or add deadband in code) for a
+# clean stand.
 
 FSM:
   _: # enabled FSMs (name -> id + C++ type)
@@ -42,9 +58,6 @@ FSM:
     BipedalRear:
       id: 6
       type: RLBase
-    BipedalFront:
-      id: 7
-      type: RLBase
 
   # ---------------------------------------------------------------------------
   Passive:
@@ -54,16 +67,15 @@ FSM:
     kd:   [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
 
   # ---------------------------------------------------------------------------
-  # FixStand holds the neutral quadruped pose. It is the "launchpad" for the
-  # four walking policies below. We disable auto_velocity so the user must
-  # explicitly pick a policy via a joystick shortcut.
+  # FixStand holds the neutral quadruped pose and is the launchpad for the
+  # walking policies below. auto_velocity is disabled so the user must pick
+  # a policy explicitly via a joystick shortcut.
   FixStand:
     transitions:
       Passive:         LT + B.on_pressed
       Velocity:        start.on_pressed
       VelocityGuarded: LB + start.on_pressed
       BipedalRear:     LB + up.on_pressed
-      BipedalFront:    LB + down.on_pressed
     auto_velocity:
       enabled: false
     kp: [60, 80, 80, 60, 80, 80, 60, 80, 80, 60, 80, 80]
@@ -77,18 +89,22 @@ FSM:
 
   # ---------------------------------------------------------------------------
   # Plain quadruped velocity walking. Surprise is OFF, so the policy runs
-  # unconditionally until the user hits LT+A or LT+B. This is the "safe default".
+  # unconditionally until the user hits LT+A or LT+B.
   Velocity:
     transitions:
       FixStand: LT + A.on_pressed
-    policy_dir: ../../../logs/rsl_rl/unitree_go2_velocity_flat/2026-04-08_14-19-59
+    policy_dir: ../../../logs/rsl_rl/unitree_go2_velocity_rough/2026-04-17_22-00-22
+    # Alternative flat-terrain policy:
+    # policy_dir: ../../../logs/rsl_rl/unitree_go2_velocity/2026-04-18_09-28-18
+    #
+    # Matches RobotRoughEnvCfg.terminations.bad_orientation (1.2 rad).
+    bad_orientation_limit: 1.2
     surprise:
       enabled: false
 
   # ---------------------------------------------------------------------------
   # Velocity walking guarded by the Surprise forward-model. When surprise
-  # trips, we hand off to Stabilize, which will auto-return here after 0.5s
-  # once the robot has recovered.
+  # trips, we hand off to Stabilize, which auto-returns here after 0.5 s.
   VelocityGuarded:
     transitions:
       FixStand: LT + A.on_pressed
@@ -112,7 +128,7 @@ FSM:
   Stabilize:
     transitions:
       FixStand: LT + A.on_pressed
-    policy_dir: ../../../logs/rsl_rl/unitree_go2_stabilize/2026-04-06_10-50-28
+    policy_dir: ../../../logs/rsl_rl/unitree_go2_stabilize/2026-04-06_15-13-35
     surprise:
       enabled: false
     auto_transition:
@@ -121,64 +137,50 @@ FSM:
       duration_s: 0.5
 
   # ---------------------------------------------------------------------------
-  # Rear bipedal "begging pose" walk: body pitched up ~90°, hind legs stance,
-  # front legs tucked. The `intro` phase rotates the body from the FixStand
-  # quadruped crouch into the bipedal joint config over 2.0s, then hands off
-  # to the policy. Joint order is motor-indexed: FR(h,t,c), FL, RR, RL.
+  # BipedalRear (rear-legs stand-up walk).
   #
-  # NOTE on intro gains: the policy itself was trained with soft kp=25, kd=0.5
-  # (see params/deploy.yaml), which are what the RL state falls back to after
-  # intro ends. Those gains are NOT strong enough to physically lift the body
-  # ~90° into a bipedal stance in an open-loop interpolation. During intro we
-  # therefore override with FixStand-level gains (kp=60 hip / 80 thigh+calf,
-  # kd=5/4/4) so the body actually reaches the target pose before the policy
-  # takes over. Gains are restored to the policy defaults once intro completes.
+  # Training env: Unitree-Go2-Bipedal-Walk (flat terrain, flat quadruped spawn;
+  # the policy must stand up from the default FixStand pose on its own).
   #
-  # Target pose matches training (REAR_STANCE_JOINT_TARGETS in bipedal_env_cfg.py):
-  #   F[LR]_hip=0.0, F[LR]_thigh=1.3,  F[LR]_calf=-2.4  (front tucked)
-  #   R[LR]_hip=0.0, R[LR]_thigh=1.2,  R[LR]_calf=-1.0  (rear stance)
+  # bad_orientation_limit here is a pure deploy-side fall cut-off — the
+  # training env has no orientation termination, so the value is chosen to
+  # trigger only on a genuine flip-over. desired_gravity selects the
+  # stance-aware variant of the check (angle vs unit desired direction
+  # instead of angle vs +body_z).
+  #
+  # EXPERIMENTAL (2026-04-18): added `intro` keyframes, `bad_roll_limit`
+  # safeguard, and tightened native fall cut-off to make the Mujoco→policy
+  # handover survivable. These are a workaround for a marginally trained
+  # policy; they might not be enough on their own and should be revisited
+  # after retraining with domain randomisation.
   BipedalRear:
     transitions:
       FixStand: LT + A.on_pressed
-    policy_dir: ../../../logs/rsl_rl/unitree_go2_bipedal_rear_flatinit/2026-04-17_12-26-27
-    # Match bipedal_env_cfg.py FlatInit: bad_orientation.limit_angle = 2.8 rad.
-    # A bipedal body is pitched ~pi/2 on purpose, so the quadruped-baseline
-    # ~1 rad limit would fire instantly. Only near-upside-down trips this.
-    bad_orientation_limit: 2.8
+    policy_dir: ../../../logs/rsl_rl/unitree_go2_bipedal_walk/2026-04-18_17-31-52
+    # EXPERIMENTAL: drop bad_orientation_limit from "only a full flip" (2.8 rad)
+    # to ~1.75 rad (~100°). At the bipedal target gravity (-1, 0, 0) this still
+    # allows the policy to recover from large pitches (e.g. partial crouch at
+    # ~60° from target), but catches a fallen-over state before it damages the
+    # robot. Pair with `bad_roll_limit` below for a direction-specific cut-off.
+    bad_orientation_limit: 1.75
+    bad_orientation_desired_gravity: [-1.0, 0.0, 0.0]
+    # EXPERIMENTAL: roll-only fall safety. `projected_gravity_b[1]` equals
+    # ``sin(roll_angle)`` at any body pitch, so `|g_b_y| > bad_roll_limit`
+    # triggers purely on sideways tip-over and is independent of the pitch
+    # deviation captured by `bad_orientation_limit`. 0.6 ≈ 37°; tune tighter
+    # (0.4 ≈ 24°) if the robot still falls on hardware before this trips.
+    bad_roll_limit: 0.6
+    # EXPERIMENTAL: soft handover from FixStand. Pins the first keyframe to the
+    # current commanded q (FixStand's held quadruped stand) and interpolates to
+    # the policy's own `default_joint_pos` over 1 s *before* the ONNX policy
+    # starts writing targets. Motor-index order (FR hip/thigh/calf, FL ..., RR
+    # ..., RL ...). Native kp/kd (25 / 0.5) are used throughout — we don't
+    # override intro_kp/intro_kd, so the only gain step is FixStand → policy
+    # at enter(), which the 1 s position ramp absorbs.
+    intro:
+      ts: [0.0, 1.0]
+      qs:
+        - []
+        - [-0.1, 0.8, -1.5,  0.1, 0.8, -1.5, -0.1, 1.0, -1.5,  0.1, 1.0, -1.5]
     surprise:
       enabled: false
-    intro:
-      ts: [0.0, 2.0]
-      qs: [
-        [],  # auto-filled with the current commanded joint state on enter()
-        # front legs tucked,                    rear legs near-straight stance
-        [0.0, 1.3, -2.4, 0.0, 1.3, -2.4,       0.0, 1.2, -1.0, 0.0, 1.2, -1.0],
-      ]
-      # Stiff intro gains (mirror FixStand) to actually rotate the body up.
-      kp: [60, 80, 80, 60, 80, 80, 60, 80, 80, 60, 80, 80]
-      kd: [ 5,  4,  4,  5,  4,  4,  5,  4,  4,  5,  4,  4]
-
-  # ---------------------------------------------------------------------------
-  # Front bipedal "handstand pose" walk: body pitched down ~90°, front legs
-  # stance, hind legs tucked. Same reasoning as BipedalRear for intro gains.
-  #
-  # Target pose matches training (FRONT_STANCE_JOINT_TARGETS):
-  #   F[LR]_hip=0.0, F[LR]_thigh=1.2,  F[LR]_calf=-1.0  (front stance)
-  #   R[LR]_hip=0.0, R[LR]_thigh=1.4,  R[LR]_calf=-2.4  (rear tucked)
-  BipedalFront:
-    transitions:
-      FixStand: LT + A.on_pressed
-    policy_dir: ../../../logs/rsl_rl/unitree_go2_bipedal_front_flat/2026-04-16_17-19-55
-    # See BipedalRear for why this is raised.
-    bad_orientation_limit: 2.8
-    surprise:
-      enabled: false
-    intro:
-      ts: [0.0, 2.0]
-      qs: [
-        [],
-        # front legs near-straight stance,      rear legs tucked
-        [0.0, 1.2, -1.0, 0.0, 1.2, -1.0,       0.0, 1.4, -2.4, 0.0, 1.4, -2.4],
-      ]
-      kp: [60, 80, 80, 60, 80, 80, 60, 80, 80, 60, 80, 80]
-      kd: [ 5,  4,  4,  5,  4,  4,  5,  4,  4,  5,  4,  4]

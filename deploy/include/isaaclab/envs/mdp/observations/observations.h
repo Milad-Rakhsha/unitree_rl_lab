@@ -1,6 +1,9 @@
 // Copyright (c) 2025, Unitree Robotics Co., Ltd.
 // All rights reserved.
 
+// Observation term implementations registered via REGISTER_OBSERVATION; names
+// must match deploy.yaml and ONNX input names where applicable.
+
 #pragma once
 
 #include "isaaclab/envs/manager_based_rl_env.h"

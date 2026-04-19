@@ -1,6 +1,9 @@
 // Copyright (c) 2025, Unitree Robotics Co., Ltd.
 // All rights reserved.
 
+// Keyframed stand: interpolates qs over ts with PD gains; optional
+// auto_velocity transition to another FSM after the trajectory plus delay.
+
 #pragma once
 
 #include "FSMState.h"

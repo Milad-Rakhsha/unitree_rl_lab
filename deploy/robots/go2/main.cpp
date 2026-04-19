@@ -1,3 +1,6 @@
+// Go2 controller entry: DDS init, static FSM I/O handles, CtrlFSM from
+// config.yaml. See deploy/README.md.
+
 #include "FSM/CtrlFSM.h"
 #include "FSM/State_Passive.h"
 #include "FSM/State_FixStand.h"

@@ -1,6 +1,11 @@
 // Copyright (c) 2025, Unitree Robotics Co., Ltd.
 // All rights reserved.
 
+// RL policy state: ManagerBasedRLEnv + ONNX policy on a worker thread at
+// step_dt; FSM thread applies processed joint targets at ~1 kHz. Supports
+// optional intro keyframes, auto_transition, surprise gate, and orientation
+// fall checks. See deploy/README.md.
+
 #pragma once
 
 #include "FSMState.h"
@@ -16,6 +21,8 @@ public:
     State_RLBase(int state_mode, std::string state_string);
     void enter();
 
+    /// Sync articulation from ``lowstate`` every FSM tick so fall checks and obs use current IMU.
+    void pre_run() override;
     void run();
     void exit();
 
@@ -38,6 +45,10 @@ private:
 
     std::mutex action_mutex;
     std::vector<float> latest_action;
+
+    /// Rate-limit counter for actionable warnings raised inside run() (empty
+    /// latest_action, action size < joint_ids_map). Reset in enter().
+    int run_warning_count_ = 0;
 
     // Optional intro keyframe phase: on enter(), linearly interpolate joint
     // positions through (ts_intro, qs_intro) before handing off to the learned

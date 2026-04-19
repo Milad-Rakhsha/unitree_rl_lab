@@ -4,7 +4,10 @@
 #include "isaaclab/envs/mdp/actions/joint_actions.h"
 #include "LinearInterpolator.h"
 #include <unitree/common/time/time_tool.hpp>
+#include <algorithm>
 #include <cmath>
+#include <string>
+#include <vector>
 
 namespace
 {
@@ -12,7 +15,7 @@ float clamp_std(float v)
 {
     return std::max(v, 1.0e-6f);
 }
-}
+}  // namespace
 
 State_RLBase::State_RLBase(int state_mode, std::string state_string)
 : FSMState(state_mode, state_string) 
@@ -48,17 +51,150 @@ State_RLBase::State_RLBase(int state_mode, std::string state_string)
     parse_auto_transition_cfg(cfg);
 
     // Auto-fall safety: if the body tilts past ``bad_orientation_limit`` rad
-    // from its nominal orientation, drop straight to Passive. Bipedal states
-    // need a larger limit (their baseline is already ~pi/2 off level).
+    // from nominal orientation, drop straight to Passive.
+    //
+    // Quadruped RL uses Isaac Lab ``bad_orientation`` (angle vs +body_z) and
+    // typically mirrors the training termination (match the training
+    // ``limit_angle`` for best behaviour). For bipedal FSM states, set
+    // ``bad_orientation_desired_gravity`` in YAML to enable the stance-aware
+    // variant (``bad_target_orientation``, angle vs a unit desired direction);
+    // the current bipedal training env has no orientation termination, so
+    // this value is a pure deploy-side fall cut-off.
     const float bad_orientation_limit = cfg["bad_orientation_limit"].as<float>(1.0f);
-    this->registered_checks.emplace_back(
-        std::make_pair(
-            [this, bad_orientation_limit]()->bool{
-                return isaaclab::mdp::bad_orientation(env.get(), bad_orientation_limit);
-            },
-            FSMStringMap.right.at("Passive")
-        )
-    );
+
+    if (cfg["bad_orientation_desired_gravity"])
+    {
+        auto desired_gravity = cfg["bad_orientation_desired_gravity"].as<std::vector<float>>();
+        if (desired_gravity.size() == 3)
+        {
+            this->registered_checks.emplace_back(
+                std::make_pair(
+                    [this, bad_orientation_limit, desired_gravity, state_string]() -> bool {
+                        const bool bad =
+                            isaaclab::mdp::bad_target_orientation(env.get(), bad_orientation_limit, desired_gravity);
+                        if (bad)
+                        {
+                            const auto& g = env->robot->data.projected_gravity_b;
+                            const float gx = g[0], gy = g[1], gz = g[2];
+                            const float dx = desired_gravity[0], dy = desired_gravity[1], dz = desired_gravity[2];
+                            float c = gx * dx + gy * dy + gz * dz;
+                            c = std::max(-1.0f, std::min(1.0f, c));
+                            const float ang = std::acos(c);
+                            spdlog::warn(
+                                "State '{}' bad_target_orientation -> Passive: angle={:.3f} > limit={:.3f}, "
+                                "g_b=({:.3f},{:.3f},{:.3f}), desired=({:.3f},{:.3f},{:.3f})",
+                                state_string,
+                                ang,
+                                bad_orientation_limit,
+                                gx,
+                                gy,
+                                gz,
+                                dx,
+                                dy,
+                                dz);
+                        }
+                        return bad;
+                    },
+                    FSMStringMap.right.at("Passive")
+                )
+            );
+        }
+        else
+        {
+            spdlog::warn(
+                "State '{}': bad_orientation_desired_gravity must have 3 elements (got {}); using quadruped check.",
+                state_string,
+                desired_gravity.size()
+            );
+            this->registered_checks.emplace_back(
+                std::make_pair(
+                    [this, bad_orientation_limit, state_string]() -> bool {
+                        const bool bad = isaaclab::mdp::bad_orientation(env.get(), bad_orientation_limit);
+                        if (bad)
+                        {
+                            const auto& g = env->robot->data.projected_gravity_b;
+                            const float gx = g[0], gy = g[1], gz = g[2];
+                            const float ang = std::fabs(std::acos(std::max(-1.0f, std::min(1.0f, -gz))));
+                            spdlog::warn(
+                                "State '{}' bad_orientation (quad fallback) -> Passive: "
+                                "angle={:.3f} > limit={:.3f}, g_b=({:.3f},{:.3f},{:.3f})",
+                                state_string,
+                                ang,
+                                bad_orientation_limit,
+                                gx,
+                                gy,
+                                gz);
+                        }
+                        return bad;
+                    },
+                    FSMStringMap.right.at("Passive")
+                )
+            );
+        }
+    }
+    else
+    {
+        this->registered_checks.emplace_back(
+            std::make_pair(
+                [this, bad_orientation_limit, state_string]() -> bool {
+                    const bool bad = isaaclab::mdp::bad_orientation(env.get(), bad_orientation_limit);
+                    if (bad)
+                    {
+                        const auto& g = env->robot->data.projected_gravity_b;
+                        const float gx = g[0], gy = g[1], gz = g[2];
+                        const float ang = std::fabs(std::acos(std::max(-1.0f, std::min(1.0f, -gz))));
+                        spdlog::warn(
+                            "State '{}' bad_orientation (quad) -> Passive: angle={:.3f} > limit={:.3f}, "
+                            "g_b=({:.3f},{:.3f},{:.3f})",
+                            state_string,
+                            ang,
+                            bad_orientation_limit,
+                            gx,
+                            gy,
+                            gz);
+                    }
+                    return bad;
+                },
+                FSMStringMap.right.at("Passive")
+            )
+        );
+    }
+
+    // EXPERIMENTAL (2026-04-18): roll-only fall safety. Registered alongside
+    // the pitch-inclusive ``bad_orientation`` / ``bad_target_orientation``
+    // check above so the state can trip on sideways tip-over with a tighter
+    // threshold than the (pitch-tolerant) total-angle check. Only activates
+    // when the YAML sets ``bad_roll_limit`` (float, units of sin(angle)).
+    if (cfg["bad_roll_limit"])
+    {
+        const float bad_roll_limit = cfg["bad_roll_limit"].as<float>();
+        this->registered_checks.emplace_back(
+            std::make_pair(
+                [this, bad_roll_limit, state_string]() -> bool {
+                    const bool bad = isaaclab::mdp::bad_roll_gravity_y(env.get(), bad_roll_limit);
+                    if (bad)
+                    {
+                        const auto& g = env->robot->data.projected_gravity_b;
+                        spdlog::warn(
+                            "State '{}' bad_roll_gravity_y -> Passive: |g_b_y|={:.3f} > limit={:.3f}, "
+                            "g_b=({:.3f},{:.3f},{:.3f})",
+                            state_string,
+                            std::fabs(g[1]),
+                            bad_roll_limit,
+                            g[0],
+                            g[1],
+                            g[2]);
+                    }
+                    return bad;
+                },
+                FSMStringMap.right.at("Passive")
+            )
+        );
+        spdlog::info(
+            "State '{}' roll fall-safety enabled: |g_b_y| > {:.3f} -> Passive.",
+            state_string,
+            bad_roll_limit);
+    }
 
     if (!surprise_target_fsm_.empty() && FSMStringMap.right.count(surprise_target_fsm_))
     {
@@ -213,6 +349,16 @@ bool State_RLBase::intro_active() const
     return intro_running.load();
 }
 
+
+void State_RLBase::pre_run()
+{
+    FSMState::pre_run();
+    // Fall-safety and observations read ``env->robot``; without this, ``projected_gravity_b``
+    // only updates on the policy thread (~decimation rate) and can stay at ctor-time / zero IMU
+    // samples — ``bad_orientation`` then trips immediately after state entry.
+    env->robot->update();
+}
+
 void State_RLBase::enter()
 {
     surprise_trip.store(false);
@@ -220,6 +366,7 @@ void State_RLBase::enter()
     surprise_over_threshold_count = 0;
     surprise_step_count = 0;
     has_prev_transition = false;
+    run_warning_count_ = 0;
 
     state_enter_wall_time_s_ = static_cast<double>(unitree::common::GetCurrentTimeMillisecond()) * 1e-3;
 
@@ -295,7 +442,15 @@ void State_RLBase::policy_loop()
     auto sleep_till = clock::now() + dt;
 
     env->reset();
-    latest_action.assign(env->action_manager->total_action_dim(), 0.0f);
+    // Raw policy outputs are affine-mapped to joint targets (scale * x + offset).
+    // ``latest_action`` must hold *processed* positions for run() — not raw zeros.
+    // Sending raw 0 as q() collapses the legs until the first ONNX step (~one period).
+    {
+        std::vector<float> zero_raw(env->action_manager->total_action_dim(), 0.0f);
+        env->action_manager->process_action(zero_raw);
+        std::lock_guard<std::mutex> lock(action_mutex);
+        latest_action = env->action_manager->processed_actions();
+    }
 
     bool intro_kp_applied = !intro_kp.empty() || !intro_kd.empty();
     bool had_intro = !ts_intro.empty();
@@ -305,7 +460,18 @@ void State_RLBase::policy_loop()
         env->episode_length += 1;
         env->robot->update();
         const auto obs_map = env->observation_manager->compute();
-        const auto action = env->alg->act(obs_map);
+
+        std::vector<float> action;
+        try
+        {
+            action = env->alg->act(obs_map);
+        }
+        catch (const std::exception& e)
+        {
+            spdlog::error("ONNX policy act() threw in state '{}': {}", getStateString(), e.what());
+            throw;
+        }
+
         env->action_manager->process_action(action);
 
         {
@@ -636,15 +802,43 @@ void State_RLBase::run()
         std::lock_guard<std::mutex> lock(action_mutex);
         action = latest_action;
     }
+    // EXPERIMENTAL (2026-04-18): previously, an empty ``latest_action`` here
+    // fell back to ``action_manager->processed_actions()``. On the very first
+    // FSM tick after ``enter()``, if the policy worker thread had not yet run
+    // ``process_action(zero_raw)``, the ActionManager's internal
+    // ``_processed_actions`` vector is still zero-initialised from its
+    // constructor. The old fallback then wrote q=0 to every motor, which at
+    // kp=25 with the Go2 in a quadruped stand produces a huge knee-extension
+    // torque spike (25 * 1.5 ≈ 37 N·m on each calf) and flips the robot
+    // backward. Holding the previous q_cmd instead — which ``enter()`` leaves
+    // untouched from the previous state (e.g. FixStand's held stance) — is
+    // safe regardless of who has or hasn't initialised what.
     if (action.empty())
     {
-        action = env->action_manager->processed_actions();
+        if (run_warning_count_ < 5)
+        {
+            spdlog::warn(
+                "State '{}' run(): latest_action empty; holding previous q_cmd this tick.",
+                getStateString());
+            run_warning_count_ += 1;
+        }
+        return;
     }
     if (action.size() < env->robot->data.joint_ids_map.size())
     {
+        if (run_warning_count_ < 5)
+        {
+            spdlog::warn(
+                "State '{}' run(): action size {} < joint_ids_map {} — skipping q_cmd (check deploy / ONNX).",
+                getStateString(),
+                action.size(),
+                env->robot->data.joint_ids_map.size());
+            run_warning_count_ += 1;
+        }
         return;
     }
-    for(int i(0); i < env->robot->data.joint_ids_map.size(); i++) {
+    for (int i(0); i < env->robot->data.joint_ids_map.size(); i++)
+    {
         lowcmd->msg_.motor_cmd()[env->robot->data.joint_ids_map[i]].q() = action[i];
     }
 }
