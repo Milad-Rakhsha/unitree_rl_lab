@@ -13,6 +13,7 @@
 #include "isaaclab/envs/mdp/terminations.h"
 #include "onnxruntime_cxx_api.h"
 #include <atomic>
+#include <fstream>
 #include <mutex>
 
 class State_RLBase : public FSMState
@@ -37,6 +38,21 @@ private:
     void parse_auto_transition_cfg(const YAML::Node& cfg);
     bool intro_active() const;
     std::vector<float> intro_current_q();
+
+    // CSV trajectory logging for sim-to-sim and deploy diffing. Enabled per
+    // state via a YAML ``csv_log: { enabled: true, path: ... }`` block. The
+    // schema matches ``scripts/rsl_rl/play_deploy_fsm.py`` so rows can be
+    // diffed directly. ``base_v*_b`` columns are written as ``nan`` because
+    // deploy has no base-linear-velocity estimate.
+    //
+    // Semantic caveat: during the intro phase the ``action_*`` columns hold
+    // the raw ONNX output (which ``run()`` discards in favour of the intro
+    // ramp), whereas the IIL CSV logs ``(target - offset) / scale``. The
+    // other columns (qpos/qvel/base pose/cmd_v*) are apples-to-apples from t=0.
+    void parse_csv_log_cfg(const YAML::Node& cfg);
+    void csv_open();
+    void csv_close();
+    void csv_write_row(double wall_s, double intro_elapsed_s, const std::vector<float>& action_raw);
 
     std::unique_ptr<isaaclab::ManagerBasedRLEnv> env;
 
@@ -93,6 +109,10 @@ private:
     // Name of the FSM to switch to when surprise trips. Configurable per state
     // via ``surprise.target_fsm``; falls back to "Stabilize" then "FixStand".
     std::string surprise_target_fsm_;
+
+    bool csv_log_enabled_ = false;
+    std::string csv_log_path_cfg_;
+    std::ofstream csv_file_;
 
     Ort::Env surprise_ort_env{ORT_LOGGING_LEVEL_WARNING, "surprise_model"};
     Ort::SessionOptions surprise_session_options;

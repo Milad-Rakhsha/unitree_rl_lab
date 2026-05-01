@@ -70,6 +70,20 @@ FSM:
   # FixStand holds the neutral quadruped pose and is the launchpad for the
   # walking policies below. auto_velocity is disabled so the user must pick
   # a policy explicitly via a joystick shortcut.
+  #
+  # EXPERIMENTAL (2026-04-18): final-hold pose changed from the symmetric
+  # quadruped (0, 0.8, -1.5) per leg to the Isaac Lab training default:
+  # hips ±0.1, front thighs 0.8, rear thighs 1.0, calves -1.5. Rationale:
+  # every downstream policy (Velocity, VelocityGuarded, BipedalRear) was
+  # trained with ``UNITREE_GO2_CFG.init_state.joint_pos`` = this pose, and
+  # the previous held pose sent the policies their first observation
+  # with a +0.2 rad rear-thigh bias (and a 0.1 rad hip splay mismatch).
+  # The Velocity policy absorbed the jerk fine; BipedalRear could not,
+  # because a bipedal stance is friction-margin-sensitive and any
+  # startup rocking transient adds to an already-marginal problem.
+  # Mid-ramp tuck pose at t=1 left symmetric — it's only a transient
+  # waypoint on the way down from a walking stance and asymmetric
+  # tucking would look unnatural.
   FixStand:
     transitions:
       Passive:         LT + B.on_pressed
@@ -84,7 +98,7 @@ FSM:
     qs: [
       [],
       [0.0, 1.36, -2.65, 0.0, 1.36, -2.65, 0.0, 1.36, -2.65, 0.0, 1.36, -2.65],
-      [0.0,  0.8, -1.5,  0.0,  0.8, -1.5,  0.0,  0.8, -1.5,  0.0,  0.8, -1.5 ],
+      [-0.1, 0.8, -1.5,  0.1, 0.8, -1.5, -0.1, 1.0, -1.5,  0.1, 1.0, -1.5],
     ]
 
   # ---------------------------------------------------------------------------
@@ -156,7 +170,7 @@ FSM:
   BipedalRear:
     transitions:
       FixStand: LT + A.on_pressed
-    policy_dir: ../../../logs/rsl_rl/unitree_go2_bipedal_walk/2026-04-18_17-31-52
+    policy_dir: ../../../logs/rsl_rl/unitree_go2_bipedal_walk/2026-04-21_15-56-29
     # EXPERIMENTAL: drop bad_orientation_limit from "only a full flip" (2.8 rad)
     # to ~1.75 rad (~100°). At the bipedal target gravity (-1, 0, 0) this still
     # allows the policy to recover from large pitches (e.g. partial crouch at
@@ -174,13 +188,30 @@ FSM:
     # current commanded q (FixStand's held quadruped stand) and interpolates to
     # the policy's own `default_joint_pos` over 1 s *before* the ONNX policy
     # starts writing targets. Motor-index order (FR hip/thigh/calf, FL ..., RR
-    # ..., RL ...). Native kp/kd (25 / 0.5) are used throughout — we don't
-    # override intro_kp/intro_kd, so the only gain step is FixStand → policy
-    # at enter(), which the 1 s position ramp absorbs.
+    # ..., RL ...).
+    #
+    # EXPERIMENTAL (2026-04-21): the intro now also overrides kp/kd to match
+    # FixStand's gains (60 / 80 / 80 per leg), instead of inheriting the
+    # policy-native 25. At the previous kp=25, the calves sagged ~0.2-0.3 rad
+    # past the commanded −1.5 under gravity, so by intro-end the handover
+    # pose was out-of-distribution for the policy (see CSV diff in
+    # scripts/rsl_rl/diff_deploy_vs_iil.py). Holding FixStand-level gains
+    # through the intro keeps the joints at the training default; kp drops
+    # to 25 exactly when the policy takes over, which matches the training
+    # initial condition (policy starts at default q, zero velocity, then
+    # handles the kp=25 sag itself).
     intro:
       ts: [0.0, 1.0]
       qs:
         - []
         - [-0.1, 0.8, -1.5,  0.1, 0.8, -1.5, -0.1, 1.0, -1.5,  0.1, 1.0, -1.5]
+      kp: [60, 80, 80, 60, 80, 80, 60, 80, 80, 60, 80, 80]
+      kd: [5, 4, 4, 5, 4, 4, 5, 4, 4, 5, 4, 4]
     surprise:
       enabled: false
+    # Per-step trajectory CSV for sim-to-sim diffing against play_deploy_fsm.py.
+    # Path is relative to the deploy project dir; omit ``path`` to auto-name the
+    # file as ``log/deploy_fsm/<state>_<YYYYmmdd_HHMMSS>.csv``. The schema
+    # matches the IIL play script so the files can be diffed directly.
+    csv_log:
+      enabled: true

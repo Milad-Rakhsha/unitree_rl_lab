@@ -1,11 +1,17 @@
 #include "FSM/State_RLBase.h"
+#include "param.h"
 #include "unitree_articulation.h"
 #include "isaaclab/envs/mdp/observations/observations.h"
 #include "isaaclab/envs/mdp/actions/joint_actions.h"
 #include "LinearInterpolator.h"
 #include <unitree/common/time/time_tool.hpp>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <ctime>
+#include <filesystem>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -49,6 +55,7 @@ State_RLBase::State_RLBase(int state_mode, std::string state_string)
     parse_surprise_cfg(cfg);
     parse_intro_cfg(cfg);
     parse_auto_transition_cfg(cfg);
+    parse_csv_log_cfg(cfg);
 
     // Auto-fall safety: if the body tilts past ``bad_orientation_limit`` rad
     // from nominal orientation, drop straight to Passive.
@@ -344,6 +351,130 @@ void State_RLBase::parse_auto_transition_cfg(const YAML::Node& cfg)
     auto_transition_duration_s_ = node["duration_s"].as<float>(4.0f);
 }
 
+void State_RLBase::parse_csv_log_cfg(const YAML::Node& cfg)
+{
+    if (!cfg["csv_log"] || !cfg["csv_log"]["enabled"].as<bool>(false))
+    {
+        return;
+    }
+    csv_log_enabled_ = true;
+    if (cfg["csv_log"]["path"])
+    {
+        csv_log_path_cfg_ = cfg["csv_log"]["path"].as<std::string>();
+    }
+}
+
+void State_RLBase::csv_open()
+{
+    if (!csv_log_enabled_) return;
+
+    std::filesystem::path path;
+    if (!csv_log_path_cfg_.empty())
+    {
+        path = csv_log_path_cfg_;
+        if (path.is_relative())
+        {
+            path = param::proj_dir / path;
+        }
+    }
+    else
+    {
+        const auto tt = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        std::tm local_tm{};
+        localtime_r(&tt, &local_tm);
+        std::ostringstream stamp;
+        stamp << std::put_time(&local_tm, "%Y%m%d_%H%M%S");
+        path = param::proj_dir / "log" / "deploy_fsm" /
+               (getStateString() + "_" + stamp.str() + ".csv");
+    }
+
+    try
+    {
+        std::filesystem::create_directories(path.parent_path());
+    }
+    catch (const std::exception& e)
+    {
+        spdlog::error("Failed to create CSV log dir '{}': {}", path.parent_path().string(), e.what());
+        csv_log_enabled_ = false;
+        return;
+    }
+
+    csv_file_.open(path);
+    if (!csv_file_.is_open())
+    {
+        spdlog::error("Failed to open CSV log at '{}'.", path.string());
+        csv_log_enabled_ = false;
+        return;
+    }
+
+    const int n = static_cast<int>(env->robot->data.joint_ids_map.size());
+    csv_file_ << "t_wall,state,intro_elapsed";
+    for (int i = 0; i < n; ++i) csv_file_ << ",qpos_" << i;
+    for (int i = 0; i < n; ++i) csv_file_ << ",qvel_" << i;
+    csv_file_ << ",base_roll,base_pitch,base_yaw";
+    csv_file_ << ",base_vx_b,base_vy_b,base_vz_b";
+    csv_file_ << ",base_wx_b,base_wy_b,base_wz_b";
+    for (int i = 0; i < n; ++i) csv_file_ << ",action_" << i;
+    csv_file_ << ",cmd_vx,cmd_vy,cmd_yaw";
+    csv_file_ << "\n";
+    csv_file_.flush();
+    spdlog::info("State '{}' CSV log started: {}", getStateString(), path.string());
+}
+
+void State_RLBase::csv_close()
+{
+    if (csv_file_.is_open())
+    {
+        csv_file_.flush();
+        csv_file_.close();
+        spdlog::info("State '{}' CSV log stopped.", getStateString());
+    }
+}
+
+void State_RLBase::csv_write_row(
+    double wall_s,
+    double intro_elapsed_s,
+    const std::vector<float>& action_raw)
+{
+    if (!csv_log_enabled_ || !csv_file_.is_open()) return;
+
+    const auto& q = env->robot->data.joint_pos;
+    const auto& qv = env->robot->data.joint_vel;
+    const auto& quat = env->robot->data.root_quat_w;
+    const auto& w_b = env->robot->data.root_ang_vel_b;
+    auto* joystick = env->robot->data.joystick;
+
+    const float qw = quat.w(), qx = quat.x(), qy = quat.y(), qz = quat.z();
+    const float roll = std::atan2(2.0f * (qw * qx + qy * qz), 1.0f - 2.0f * (qx * qx + qy * qy));
+    const float pitch_arg = std::max(-1.0f, std::min(1.0f, 2.0f * (qw * qy - qz * qx)));
+    const float pitch = std::asin(pitch_arg);
+    const float yaw = std::atan2(2.0f * (qw * qz + qx * qy), 1.0f - 2.0f * (qy * qy + qz * qz));
+
+    float cmd_vx = 0.0f, cmd_vy = 0.0f, cmd_wz = 0.0f;
+    if (joystick && env->cfg["commands"] && env->cfg["commands"]["base_velocity"])
+    {
+        const auto ranges = env->cfg["commands"]["base_velocity"]["ranges"];
+        cmd_vx = std::clamp(joystick->ly(), ranges["lin_vel_x"][0].as<float>(), ranges["lin_vel_x"][1].as<float>());
+        cmd_vy = std::clamp(-joystick->lx(), ranges["lin_vel_y"][0].as<float>(), ranges["lin_vel_y"][1].as<float>());
+        cmd_wz = std::clamp(-joystick->rx(), ranges["ang_vel_z"][0].as<float>(), ranges["ang_vel_z"][1].as<float>());
+    }
+
+    csv_file_ << std::fixed << std::setprecision(6);
+    csv_file_ << wall_s << "," << getStateString() << "," << intro_elapsed_s;
+    for (int i = 0; i < q.size(); ++i) csv_file_ << "," << q[i];
+    for (int i = 0; i < qv.size(); ++i) csv_file_ << "," << qv[i];
+    csv_file_ << "," << roll << "," << pitch << "," << yaw;
+    csv_file_ << ",nan,nan,nan";
+    csv_file_ << "," << w_b[0] << "," << w_b[1] << "," << w_b[2];
+    for (float a : action_raw) csv_file_ << "," << a;
+    csv_file_ << "," << cmd_vx << "," << cmd_vy << "," << cmd_wz;
+    csv_file_ << "\n";
+    // Flush every row — the whole point of this log is to capture the
+    // trajectory up to a crash, which would otherwise leave the tail in
+    // a buffered stream.
+    csv_file_.flush();
+}
+
 bool State_RLBase::intro_active() const
 {
     return intro_running.load();
@@ -403,6 +534,7 @@ void State_RLBase::enter()
     }
 
     env->robot->update();
+    csv_open();
     policy_thread_running.store(true);
     policy_thread = std::thread([this] { this->policy_loop(); });
 }
@@ -432,6 +564,7 @@ void State_RLBase::exit()
     }
     intro_running.store(false);
     state_enter_wall_time_s_ = 0.0;
+    csv_close();
 }
 
 void State_RLBase::policy_loop()
@@ -453,10 +586,53 @@ void State_RLBase::policy_loop()
     }
 
     bool intro_kp_applied = !intro_kp.empty() || !intro_kd.empty();
-    bool had_intro = !ts_intro.empty();
+    const bool had_intro = !ts_intro.empty();
+    // EXPERIMENTAL (2026-04-18): ``intro_cleanup_pending`` fires once on the
+    // first iteration *after* ``intro_running`` transitions to false. It is
+    // a strict superset of the legacy ``intro_kp_applied`` gate so the
+    // post-intro obs refresh runs even for states that don't override the
+    // PD gains during the intro (e.g. BipedalRear).
+    bool intro_cleanup_pending = had_intro;
 
     while (policy_thread_running.load())
     {
+        // EXPERIMENTAL (2026-04-18): refresh the observation history at the
+        // intro->policy handover. During the 1 s intro, ``run()`` discards
+        // the policy's outputs and writes ``intro_current_q()`` instead, but
+        // the policy thread keeps running inference at ``step_dt`` and
+        // accumulating observations. Those observations reflect the intro
+        // ramp (joints track an open-loop target), not the policy's own
+        // commands, so by intro-end the obs history carries a
+        // ``(joint_pos_rel, last_action)`` pairing that never occurs during
+        // training (where ``last_action`` *caused* ``joint_pos``). Calling
+        // ``env->reset()`` here repopulates each term's history with the
+        // current (intro-end) observation and zeroes ``_action`` so the
+        // first post-intro inference sees a clean buffer. ``latest_action``
+        // is re-seeded with the processed zero action (= ``default_joint_pos``)
+        // so ``run()`` on the FSM thread writes the intro-end target for the
+        // handful of milliseconds before the fresh inference below lands.
+        if (intro_cleanup_pending && !intro_running.load())
+        {
+            env->reset();
+            {
+                std::vector<float> zero_raw(env->action_manager->total_action_dim(), 0.0f);
+                env->action_manager->process_action(zero_raw);
+                std::lock_guard<std::mutex> lock(action_mutex);
+                latest_action = env->action_manager->processed_actions();
+            }
+            if (intro_kp_applied)
+            {
+                for (size_t i = 0; i < env->robot->data.joint_stiffness.size(); ++i)
+                {
+                    lowcmd->msg_.motor_cmd()[i].kp() = env->robot->data.joint_stiffness[i];
+                    lowcmd->msg_.motor_cmd()[i].kd() = env->robot->data.joint_damping[i];
+                }
+                intro_kp_applied = false;
+            }
+            intro_cleanup_pending = false;
+            spdlog::info("State '{}' intro complete; policy now in control.", getStateString());
+        }
+
         env->episode_length += 1;
         env->robot->update();
         const auto obs_map = env->observation_manager->compute();
@@ -479,21 +655,18 @@ void State_RLBase::policy_loop()
             latest_action = env->action_manager->processed_actions();
         }
 
+        if (csv_log_enabled_ && csv_file_.is_open())
+        {
+            const double now_s = static_cast<double>(unitree::common::GetCurrentTimeMillisecond()) * 1e-3;
+            const double intro_elapsed = (state_enter_wall_time_s_ > 0.0)
+                ? (now_s - state_enter_wall_time_s_)
+                : 0.0;
+            csv_write_row(now_s, intro_elapsed, action);
+        }
+
         if (surprise_enabled.load() && obs_map.count("obs"))
         {
             update_surprise_gate(obs_map.at("obs"), action);
-        }
-
-        // Once the intro phase finishes, restore the policy's native gains.
-        if (had_intro && intro_kp_applied && !intro_running.load())
-        {
-            for (size_t i = 0; i < env->robot->data.joint_stiffness.size(); ++i)
-            {
-                lowcmd->msg_.motor_cmd()[i].kp() = env->robot->data.joint_stiffness[i];
-                lowcmd->msg_.motor_cmd()[i].kd() = env->robot->data.joint_damping[i];
-            }
-            intro_kp_applied = false;
-            spdlog::info("State '{}' intro complete; policy now in control.", getStateString());
         }
 
         std::this_thread::sleep_until(sleep_till);
