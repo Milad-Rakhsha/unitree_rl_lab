@@ -145,6 +145,13 @@ class UnitreeActuatorCfg_Go2HV(UnitreeActuatorCfg):
     Y1 = 20.2
     Y2 = 23.4
 
+    # Match MuJoCo passive joint forces for sim2sim/sim2real fidelity:
+    #   Fs → MuJoCo frictionloss (0.2 Nm Coulomb dry friction per joint)
+    #   Fd → MuJoCo dof_damping  (0.1 Nm/(rad/s) viscous damping per joint)
+    Fs: float = 0.2
+    Fd: float = 0.1
+    Va: float = 0.01
+
 
 @configclass
 class UnitreeActuatorCfg_N7520_14p3(UnitreeActuatorCfg):
