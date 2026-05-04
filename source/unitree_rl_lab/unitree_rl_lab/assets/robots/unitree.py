@@ -15,6 +15,8 @@ from isaaclab.actuators import IdealPDActuatorCfg, ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 from isaaclab.utils import configclass
 
+from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
+
 from unitree_rl_lab.assets.robots import unitree_actuators
 
 
@@ -27,11 +29,12 @@ class UnitreeArticulationCfg(ArticulationCfg):
     soft_joint_pos_limit_factor = 0.9
 
 
-UNITREE_MODEL_DIR = "/home/milad/Documents/Repos/unitree_model"
+# Use IsaacLab's Nucleus cloud assets instead of a local path
+UNITREE_MODEL_DIR = f"{ISAACLAB_NUCLEUS_DIR}/Robots/Unitree"
 
 UNITREE_GO2_CFG = UnitreeArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path=f"{UNITREE_MODEL_DIR}/Go2/usd/go2.usd",
+        usd_path=f"{UNITREE_MODEL_DIR}/Go2/go2.usd",
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,

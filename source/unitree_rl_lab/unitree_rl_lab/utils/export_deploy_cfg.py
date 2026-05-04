@@ -9,11 +9,23 @@ from isaaclab.utils.string import resolve_matching_names
 
 
 def _to_numpy(x):
-    """Convert a torch.Tensor, warp.array, numpy.ndarray, or python scalar to numpy array."""
-    if hasattr(x, "detach"):  # torch.Tensor
+    """Convert a torch.Tensor, ProxyArray, warp.array, numpy.ndarray, or python scalar to numpy array."""
+    import torch
+    # IsaacLab 3.0 ProxyArray: has a .torch property returning a zero-copy tensor view
+    if type(x).__name__ == 'ProxyArray':
+        return x.torch.detach().cpu().numpy()
+    if isinstance(x, torch.Tensor):
         return x.detach().cpu().numpy()
-    if hasattr(x, "numpy"):  # warp.array
-        return x.numpy()
+    if hasattr(x, "detach"):
+        return x.detach().cpu().numpy()
+    if hasattr(x, "cpu"):
+        return np.asarray(x.cpu())
+    if hasattr(x, "numpy"):
+        try:
+            return x.numpy()
+        except TypeError:
+            if hasattr(x, "cpu"):
+                return x.cpu().numpy()
     return np.asarray(x)
 
 
