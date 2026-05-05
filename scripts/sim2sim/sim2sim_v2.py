@@ -56,13 +56,19 @@ def main():
     p.add_argument("--csv", default=None)
     p.add_argument("--cmd-vx", type=float, default=0.0)
     p.add_argument("--cmd-yaw", type=float, default=0.0)
+    p.add_argument("--sim-dt", type=float, default=None, help="Override MuJoCo sim timestep (smaller=more stable)")
     args = p.parse_args()
 
     model = mujoco.MjModel.from_xml_path(args.scene)
     data = mujoco.MjData(model)
-    dt = model.opt.timestep  # 0.002
-    substeps = 4             # 125 Hz control
-    ctrl_dt = substeps * dt  # 0.008
+    # Allow overriding sim dt for stability (smaller = more accurate explicit integration)
+    if hasattr(args, 'sim_dt') and args.sim_dt:
+        model.opt.timestep = args.sim_dt
+    dt = model.opt.timestep
+    # Keep control at 50 Hz regardless of sim dt
+    substeps = round(0.02 / dt)  # ctrl_dt = 0.02s = 50 Hz
+    ctrl_dt = substeps * dt
+    assert abs(ctrl_dt - 0.02) < 1e-6, f"ctrl_dt={ctrl_dt} != 0.02"
 
     kp = np.full(12, 25.0); kd = np.full(12, 0.5)
     dpos = DPOS.copy()

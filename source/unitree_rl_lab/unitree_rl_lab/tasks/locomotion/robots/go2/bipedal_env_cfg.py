@@ -151,6 +151,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab_physx.physics import PhysxCfg
+from isaaclab_newton.physics import NewtonCfg, MJWarpSolverCfg
 from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
@@ -660,7 +661,7 @@ class RewardsCfg:
     # only affordable strategy.
     base_height = RewTerm(
         func=bipedal_mdp.base_height_l2,
-        weight=-1.0,
+        weight=-2.0,
         params={"target_height": BIPEDAL_TARGET_BASE_Z},
     )
     # World-frame (gravity-aligned) versions so these penalties do not
@@ -859,7 +860,7 @@ class RewardsCfg:
     )
     front_foot_contact = RewTerm(
         func=mdp.undesired_contacts,
-        weight=-0.5,
+        weight=-1.5,
         params={
             "threshold": 1.0,
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names="F[LR]_foot"),
@@ -1011,3 +1012,42 @@ class RobotBipedalWalkPlayEnvCfg(RobotBipedalWalkEnvCfg):
         self.events.randomize_actuator_gains = None
         self.events.push_robot = None
         self.commands.base_velocity.ranges = self.commands.base_velocity.limit_ranges
+
+
+@configclass
+class RobotBipedalWalkNewtonEnvCfg(RobotBipedalWalkEnvCfg):
+    """Newton (MuJoCo Warp) variant — trains with the same contact solver as MuJoCo.
+
+    Everything else is identical to the PhysX training config. This eliminates
+    the sim-to-sim gap at the contact dynamics level.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        # Replace PhysX with Newton (MuJoCo Warp solver)
+        self.sim.physics = NewtonCfg(
+            solver_cfg=MJWarpSolverCfg(
+                iterations=100,
+                ls_iterations=50,
+                solver="newton",
+                integrator="euler",
+            ),
+        )
+
+
+@configclass
+class RobotBipedalWalkNewtonPlayEnvCfg(RobotBipedalWalkNewtonEnvCfg):
+    """Newton play/eval variant."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 32
+        self.observations.policy.enable_corruption = False
+        self.events.physics_material = None
+        self.events.add_base_mass = None
+        self.events.add_rear_leg_mass = None
+        self.events.randomize_base_com = None
+        self.events.randomize_actuator_gains = None
+        self.events.push_robot = None
+        self.commands.base_velocity.ranges = self.commands.base_velocity.limit_ranges
+
