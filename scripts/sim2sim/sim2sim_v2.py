@@ -16,12 +16,60 @@ import mujoco, numpy as np, torch, yaml
 
 # ── Constants ────────────────────────────────────────────────────────
 Y1, Y2, X1, X2 = 20.2, 23.4, 13.5, 30.0
-IQPOS = np.array([7, 10, 13, 16, 8, 11, 14, 17, 9, 12, 15, 18])
-IQVEL = np.array([6, 9, 12, 15, 7, 10, 13, 16, 8, 11, 14, 17])
-IACT  = np.array([3, 0, 9, 6, 4, 1, 10, 7, 5, 2, 11, 8])
-DPOS  = np.array([0.1, -0.1, 0.1, -0.1, 0.8, 0.8, 1.0, 1.0, -1.5, -1.5, -1.5, -1.5])
-KPF   = np.array([60., 60, 60, 60, 80, 80, 80, 80, 80, 80, 80, 80])
-KDF   = np.array([5., 5, 5, 5, 4, 4, 4, 4, 4, 4, 4, 4])
+
+# Default mappings for PhysX policy order:
+# Policy order: FL_hip, FR_hip, RL_hip, RR_hip, FL_thigh, FR_thigh, ...
+IQPOS_PHYSX = np.array([7, 10, 13, 16, 8, 11, 14, 17, 9, 12, 15, 18])
+IQVEL_PHYSX = np.array([6, 9, 12, 15, 7, 10, 13, 16, 8, 11, 14, 17])
+IACT_PHYSX  = np.array([3, 0, 9, 6, 4, 1, 10, 7, 5, 2, 11, 8])
+DPOS_PHYSX  = np.array([0.1, -0.1, 0.1, -0.1, 0.8, 0.8, 1.0, 1.0, -1.5, -1.5, -1.5, -1.5])
+KPF_PHYSX   = np.array([60., 60, 60, 60, 80, 80, 80, 80, 80, 80, 80, 80])
+KDF_PHYSX   = np.array([5., 5, 5, 5, 4, 4, 4, 4, 4, 4, 4, 4])
+
+# Newton (MuJoCo Warp) policy order:
+# Policy order: FL_hip, FL_thigh, FL_calf, FR_hip, FR_thigh, FR_calf, ...
+IQPOS_NEWTON = np.array([7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18])
+IQVEL_NEWTON = np.array([6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17])
+IACT_NEWTON  = np.array([3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8])
+DPOS_NEWTON  = np.array([0.1, 0.8, -1.5, -0.1, 0.8, -1.5, 0.1, 1.0, -1.5, -0.1, 1.0, -1.5])
+KPF_NEWTON   = np.array([60., 80, 80, 60, 80, 80, 60, 80, 80, 60, 80, 80])
+KDF_NEWTON   = np.array([5., 4, 4, 5, 4, 4, 5, 4, 4, 5, 4, 4])
+
+# Legacy aliases (default to PhysX for backward compat)
+IQPOS = IQPOS_PHYSX
+IQVEL = IQVEL_PHYSX
+IACT  = IACT_PHYSX
+DPOS  = DPOS_PHYSX
+KPF   = KPF_PHYSX
+KDF   = KDF_PHYSX
+
+
+def detect_joint_ordering(deploy_yaml_path):
+    """Detect PhysX vs Newton joint ordering from deploy.yaml joint_ids_map.
+
+    PhysX joint_ids_map: [3, 0, 9, 6, 4, 1, 10, 7, 5, 2, 11, 8]
+    Newton joint_ids_map: [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
+
+    Returns 'newton' or 'physx'.
+    """
+    if not deploy_yaml_path or not os.path.exists(deploy_yaml_path):
+        return 'physx'  # default
+    with open(deploy_yaml_path) as f:
+        cfg = yaml.safe_load(f)
+    jmap = cfg.get('joint_ids_map')
+    if jmap is None:
+        return 'physx'
+    # Newton has per-leg grouped: [3,4,5,0,1,2,9,10,11,6,7,8]
+    if jmap == [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]:
+        return 'newton'
+    return 'physx'
+
+
+def get_mappings(ordering):
+    """Return (IQPOS, IQVEL, IACT, DPOS, KPF, KDF) for the given ordering."""
+    if ordering == 'newton':
+        return IQPOS_NEWTON, IQVEL_NEWTON, IACT_NEWTON, DPOS_NEWTON, KPF_NEWTON, KDF_NEWTON
+    return IQPOS_PHYSX, IQVEL_PHYSX, IACT_PHYSX, DPOS_PHYSX, KPF_PHYSX, KDF_PHYSX
 
 def clip_torque(tau, vel):
     sd = (vel * tau) > 0; me = np.where(sd, Y1, Y2)
@@ -57,6 +105,8 @@ def main():
     p.add_argument("--cmd-vx", type=float, default=0.0)
     p.add_argument("--cmd-yaw", type=float, default=0.0)
     p.add_argument("--sim-dt", type=float, default=None, help="Override MuJoCo sim timestep (smaller=more stable)")
+    p.add_argument("--backend", choices=["physx", "newton", "auto"], default="auto",
+                   help="Joint ordering: physx, newton, or auto-detect from deploy.yaml")
     args = p.parse_args()
 
     model = mujoco.MjModel.from_xml_path(args.scene)
@@ -70,10 +120,29 @@ def main():
     ctrl_dt = substeps * dt
     assert abs(ctrl_dt - 0.02) < 1e-6, f"ctrl_dt={ctrl_dt} != 0.02"
 
+    # Auto-find deploy.yaml from checkpoint dir
+    deploy_yaml = args.deploy_yaml
+    if deploy_yaml is None:
+        checkpoint_dir = os.path.dirname(args.checkpoint)
+        for candidate in [
+            os.path.join(checkpoint_dir, "params", "deploy.yaml"),
+            os.path.join(os.path.dirname(checkpoint_dir), "params", "deploy.yaml"),
+        ]:
+            if os.path.exists(candidate):
+                deploy_yaml = candidate
+                break
+
+    # Detect joint ordering
+    if args.backend == "auto":
+        ordering = detect_joint_ordering(deploy_yaml)
+    else:
+        ordering = args.backend
+    iqpos, iqvel, iact, dpos, kpf, kdf = get_mappings(ordering)
+    print(f"Joint ordering: {ordering} (deploy_yaml: {deploy_yaml})")
+
     kp = np.full(12, 25.0); kd = np.full(12, 0.5)
-    dpos = DPOS.copy()
-    if args.deploy_yaml and os.path.exists(args.deploy_yaml):
-        with open(args.deploy_yaml) as f: cfg = yaml.safe_load(f)
+    if deploy_yaml and os.path.exists(deploy_yaml):
+        with open(deploy_yaml) as f: cfg = yaml.safe_load(f)
         kp = np.array(cfg["stiffness"]); kd = np.array(cfg["damping"])
         dpos = np.array(cfg["default_joint_pos"])
 
@@ -83,7 +152,7 @@ def main():
 
     # ─── Init ────────────────────────────────────────────────────────
     data.qpos[:3] = [0, 0, 0.31]; data.qpos[3:7] = [1, 0, 0, 0]
-    for i in range(12): data.qpos[int(IQPOS[i])] = dpos[i]
+    for i in range(12): data.qpos[int(iqpos[i])] = dpos[i]
     data.qvel[:] = 0; mujoco.mj_forward(model, data)
 
     viewer = mujoco.viewer.launch_passive(model, data) if args.render else None
@@ -95,13 +164,13 @@ def main():
     # ─── Warmup: 400 fixstand (FixStand gains) + 200 intro (uniform 60/5) ──
     for _ in range(400):
         for i in range(12):
-            qi = data.qpos[int(IQPOS[i])]; dqi = data.qvel[int(IQVEL[i])]
-            data.ctrl[int(IACT[i])] = KPF[i] * (dpos[i] - qi) + KDF[i] * (0 - dqi)
+            qi = data.qpos[int(iqpos[i])]; dqi = data.qvel[int(iqvel[i])]
+            data.ctrl[int(iact[i])] = kpf[i] * (dpos[i] - qi) + kdf[i] * (0 - dqi)
         mujoco.mj_step(model, data)
     for _ in range(200):
         for i in range(12):
-            qi = data.qpos[int(IQPOS[i])]; dqi = data.qvel[int(IQVEL[i])]
-            data.ctrl[int(IACT[i])] = 60.0 * (dpos[i] - qi) + 5.0 * (0 - dqi)
+            qi = data.qpos[int(iqpos[i])]; dqi = data.qvel[int(iqvel[i])]
+            data.ctrl[int(iact[i])] = 60.0 * (dpos[i] - qi) + 5.0 * (0 - dqi)
         mujoco.mj_step(model, data)
     print(f"  Warmup done (1.2s): z={data.qpos[2]:.4f}")
 
@@ -125,8 +194,8 @@ def main():
         t = step * ctrl_dt
         quat = data.qpos[3:7]; pg = qri(quat, np.array([0., 0., -1.]))
         av = data.qvel[3:6].copy()
-        jp = np.array([data.qpos[int(IQPOS[i])] for i in range(12)])
-        jv = np.array([data.qvel[int(IQVEL[i])] for i in range(12)])
+        jp = np.array([data.qpos[int(iqpos[i])] for i in range(12)])
+        jv = np.array([data.qvel[int(iqvel[i])] for i in range(12)])
         jpr = jp - dpos
 
         ang_buf.append(av * 0.2); grav_buf.append(pg.copy())
@@ -149,10 +218,10 @@ def main():
         for _ in range(substeps):
             tau = np.zeros(12); vel = np.zeros(12)
             for i in range(12):
-                qi = data.qpos[int(IQPOS[i])]; dqi = data.qvel[int(IQVEL[i])]
+                qi = data.qpos[int(iqpos[i])]; dqi = data.qvel[int(iqvel[i])]
                 tau[i] = kp[i] * (target_q[i] - qi) + kd[i] * (0 - dqi); vel[i] = dqi
             tau = clip_torque(tau, vel)
-            for i in range(12): data.ctrl[int(IACT[i])] = tau[i]
+            for i in range(12): data.ctrl[int(iact[i])] = tau[i]
             mujoco.mj_step(model, data)
 
         sinp = 2 * (quat[0]*quat[2] - quat[3]*quat[1])
