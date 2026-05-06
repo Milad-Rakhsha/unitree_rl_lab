@@ -135,18 +135,18 @@ class EventCfg:
             "pose_range": {
                 "x": (-0.6, 0.6),
                 "y": (-0.6, 0.6),
-                "z": (-0.08, 0.25),
-                "roll": (-0.85, 0.85),
-                "pitch": (-0.85, 0.85),
+                "z": (-0.08, 0.60),
+                "roll": (-1.2, 1.2),
+                "pitch": (-1.2, 1.2),
                 "yaw": (-3.14159, 3.14159),
             },
             "velocity_range": {
-                "x": (-2.0, 2.0),
-                "y": (-2.0, 2.0),
-                "z": (-1.2, 1.2),
-                "roll": (-2.5, 2.5),
-                "pitch": (-2.5, 2.5),
-                "yaw": (-3.5, 3.5),
+                "x": (-2.5, 2.5),
+                "y": (-2.5, 2.5),
+                "z": (-1.5, 1.5),
+                "roll": (-3.5, 3.5),
+                "pitch": (-4.0, 4.0),
+                "yaw": (-4.0, 4.0),
             },
         },
     )
@@ -155,8 +155,8 @@ class EventCfg:
         func=mdp.reset_joints_by_scale,
         mode="reset",
         params={
-            "position_range": (0.45, 1.55),
-            "velocity_range": (-3.5, 3.5),
+            "position_range": (0.35, 1.75),
+            "velocity_range": (-5.0, 5.0),
         },
     )
 
@@ -292,6 +292,40 @@ class RobotEnvCfg(ManagerBasedRLEnvCfg):
 
 @configclass
 class RobotPlayEnvCfg(RobotEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 32
+        self.scene.terrain.terrain_generator.num_rows = 2
+        self.scene.terrain.terrain_generator.num_cols = 1
+
+
+@configclass
+class RobotNewtonEnvCfg(RobotEnvCfg):
+    """Newton (MuJoCo Warp) variant — trains with the same contact solver as MuJoCo.
+
+    Everything else is identical to the PhysX training config. This eliminates
+    the sim-to-sim gap at the contact dynamics level.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        # Replace PhysX with Newton (MuJoCo Warp solver)
+        from isaaclab_newton.physics import NewtonCfg, MJWarpSolverCfg
+
+        self.sim.physics = NewtonCfg(
+            solver_cfg=MJWarpSolverCfg(
+                iterations=100,
+                ls_iterations=50,
+                solver="newton",
+                integrator="euler",
+            ),
+        )
+
+
+@configclass
+class RobotNewtonPlayEnvCfg(RobotNewtonEnvCfg):
+    """Newton play/eval variant."""
+
     def __post_init__(self):
         super().__post_init__()
         self.scene.num_envs = 32

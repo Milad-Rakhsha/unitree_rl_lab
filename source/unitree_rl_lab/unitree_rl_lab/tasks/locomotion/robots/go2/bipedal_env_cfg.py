@@ -148,6 +148,7 @@ TumblerNet Estimator Net + auxiliary regression head.
 import math
 
 import isaaclab.sim as sim_utils
+import isaaclab.terrains as terrain_gen
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab_physx.physics import PhysxCfg
@@ -170,6 +171,34 @@ from unitree_rl_lab.assets.robots.unitree import UNITREE_GO2_CFG as ROBOT_CFG
 from unitree_rl_lab.tasks.locomotion import mdp
 
 from . import bipedal_mdp
+
+# ---------------------------------------------------------------------------
+# Terrain configuration (rough terrain for robust bipedal walking)
+# ---------------------------------------------------------------------------
+
+GO2_BIPEDAL_TERRAIN_CFG = terrain_gen.TerrainGeneratorCfg(
+    size=(8.0, 8.0),
+    border_width=20.0,
+    num_rows=10,
+    num_cols=20,
+    horizontal_scale=0.1,
+    vertical_scale=0.005,
+    slope_threshold=0.75,
+    difficulty_range=(0.0, 1.0),
+    use_cache=False,
+    sub_terrains={
+        "flat": terrain_gen.MeshPlaneTerrainCfg(proportion=0.3),
+        "random_rough": terrain_gen.HfRandomUniformTerrainCfg(
+            proportion=0.35, noise_range=(0.01, 0.04), noise_step=0.01, border_width=0.25
+        ),
+        "hf_pyramid_slope": terrain_gen.HfPyramidSlopedTerrainCfg(
+            proportion=0.25, slope_range=(0.0, 0.15), platform_width=1.5, border_width=0.25
+        ),
+        "boxes": terrain_gen.MeshRandomGridTerrainCfg(
+            proportion=0.1, grid_width=0.45, grid_height_range=(0.025, 0.08), platform_width=1.5
+        ),
+    },
+)
 
 # ---------------------------------------------------------------------------
 # Stance constants (rear-legs stance only)
@@ -1015,6 +1044,50 @@ class RobotBipedalWalkPlayEnvCfg(RobotBipedalWalkEnvCfg):
 
 
 @configclass
+class RobotBipedalWalkRoughEnvCfg(RobotBipedalWalkEnvCfg):
+    """Bipedal walking on rough terrain variant — adds terrain robustness.
+    
+    Enables procedurally-generated rough terrain (random rough, pyramid slopes,
+    boxes, flat) and expanded initial spawn tilt. Everything else inherits from
+    the base flat-terrain bipedal config.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        
+        # -- terrain: swap flat plane for procedural rough terrain
+        self.scene.terrain.terrain_type = "generator"
+        self.scene.terrain.terrain_generator = GO2_BIPEDAL_TERRAIN_CFG
+        self.scene.terrain.max_init_terrain_level = 0
+        
+        # -- initial spawn tilt: expanded from ±0.05 to ±0.14 rad
+        self.events.reset_base.params["pose_range"]["roll"] = (-0.14, 0.14)
+        self.events.reset_base.params["pose_range"]["pitch"] = (-0.14, 0.14)
+        
+        # -- terrain curriculum: disabled for consistent training difficulty
+        if self.scene.terrain.terrain_generator is not None:
+            self.scene.terrain.terrain_generator.curriculum = False
+
+
+@configclass
+class RobotBipedalWalkRoughPlayEnvCfg(RobotBipedalWalkRoughEnvCfg):
+    """Rough terrain play/eval variant."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 32
+        self.observations.policy.enable_corruption = False
+        # Turn off all DR for playback
+        self.events.physics_material = None
+        self.events.add_base_mass = None
+        self.events.add_rear_leg_mass = None
+        self.events.randomize_base_com = None
+        self.events.randomize_actuator_gains = None
+        self.events.push_robot = None
+        self.commands.base_velocity.ranges = self.commands.base_velocity.limit_ranges
+
+
+@configclass
 class RobotBipedalWalkNewtonEnvCfg(RobotBipedalWalkEnvCfg):
     """Newton (MuJoCo Warp) variant — trains with the same contact solver as MuJoCo.
 
@@ -1038,6 +1111,40 @@ class RobotBipedalWalkNewtonEnvCfg(RobotBipedalWalkEnvCfg):
 @configclass
 class RobotBipedalWalkNewtonPlayEnvCfg(RobotBipedalWalkNewtonEnvCfg):
     """Newton play/eval variant."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 32
+        self.observations.policy.enable_corruption = False
+        self.events.physics_material = None
+        self.events.add_base_mass = None
+        self.events.add_rear_leg_mass = None
+        self.events.randomize_base_com = None
+        self.events.randomize_actuator_gains = None
+        self.events.push_robot = None
+        self.commands.base_velocity.ranges = self.commands.base_velocity.limit_ranges
+
+
+@configclass
+class RobotBipedalWalkRoughNewtonEnvCfg(RobotBipedalWalkRoughEnvCfg):
+    """Rough terrain + Newton variant."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        # Replace PhysX with Newton (MuJoCo Warp solver)
+        self.sim.physics = NewtonCfg(
+            solver_cfg=MJWarpSolverCfg(
+                iterations=100,
+                ls_iterations=50,
+                solver="newton",
+                integrator="euler",
+            ),
+        )
+
+
+@configclass
+class RobotBipedalWalkRoughNewtonPlayEnvCfg(RobotBipedalWalkRoughNewtonEnvCfg):
+    """Rough terrain + Newton play/eval variant."""
 
     def __post_init__(self):
         super().__post_init__()

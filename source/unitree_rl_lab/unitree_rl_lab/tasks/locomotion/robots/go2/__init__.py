@@ -49,6 +49,17 @@ gym.register(
     },
 )
 
+gym.register(
+    id="Unitree-Go2-Stabilize-Newton",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stabilization_env_cfg:RobotNewtonEnvCfg",
+        "play_env_cfg_entry_point": f"{__name__}.stabilization_env_cfg:RobotNewtonPlayEnvCfg",
+        "rsl_rl_cfg_entry_point": f"unitree_rl_lab.tasks.locomotion.agents.rsl_rl_ppo_cfg:BasePPORunnerCfg",
+    },
+)
+
 # -- Bipedal walking (rear-legs stance, flat spawn). ---
 #
 # Uses the custom ``PositiveRewardManagerBasedRLEnv`` entry point so the
@@ -73,6 +84,30 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": f"{__name__}.bipedal_env_cfg:RobotBipedalWalkNewtonEnvCfg",
         "play_env_cfg_entry_point": f"{__name__}.bipedal_env_cfg:RobotBipedalWalkNewtonPlayEnvCfg",
+        "rsl_rl_cfg_entry_point": f"unitree_rl_lab.tasks.locomotion.agents.rsl_rl_ppo_cfg:BasePPORunnerCfg",
+    },
+)
+
+# -- Bipedal walking on rough terrain (PhysX) ---
+gym.register(
+    id="Unitree-Go2-Bipedal-Walk-Rough",
+    entry_point=f"{__name__}.bipedal_env:PositiveRewardManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.bipedal_env_cfg:RobotBipedalWalkRoughEnvCfg",
+        "play_env_cfg_entry_point": f"{__name__}.bipedal_env_cfg:RobotBipedalWalkRoughPlayEnvCfg",
+        "rsl_rl_cfg_entry_point": f"unitree_rl_lab.tasks.locomotion.agents.rsl_rl_ppo_cfg:BasePPORunnerCfg",
+    },
+)
+
+# -- Bipedal walking on rough terrain with Newton ---
+gym.register(
+    id="Unitree-Go2-Bipedal-Walk-Rough-Newton",
+    entry_point=f"{__name__}.bipedal_env:PositiveRewardManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.bipedal_env_cfg:RobotBipedalWalkRoughNewtonEnvCfg",
+        "play_env_cfg_entry_point": f"{__name__}.bipedal_env_cfg:RobotBipedalWalkRoughNewtonPlayEnvCfg",
         "rsl_rl_cfg_entry_point": f"unitree_rl_lab.tasks.locomotion.agents.rsl_rl_ppo_cfg:BasePPORunnerCfg",
     },
 )
