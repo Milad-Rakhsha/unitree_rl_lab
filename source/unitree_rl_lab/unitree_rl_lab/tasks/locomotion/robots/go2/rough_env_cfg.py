@@ -38,7 +38,7 @@ from isaaclab.utils import configclass
 
 from unitree_rl_lab.tasks.locomotion import mdp
 
-from .velocity_env_cfg import RobotEnvCfg, RobotSceneCfg
+from .velocity_env_cfg import RobotEnvCfg, RobotSceneCfg, VelocityRoughPhysicsCfg
 
 
 @configclass
@@ -63,6 +63,9 @@ class RobotRoughEnvCfg(RobotEnvCfg):
 
     def __post_init__(self):
         super().__post_init__()
+
+        # -- physics: use rough-terrain preset (higher njmax, shape margin)
+        self.sim.physics = VelocityRoughPhysicsCfg()
 
         # -- terrain: swap the flat plane for procedural rough terrain.
         self.scene.terrain.terrain_type = "generator"

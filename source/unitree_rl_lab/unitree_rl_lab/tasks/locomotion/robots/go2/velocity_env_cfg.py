@@ -5,6 +5,8 @@ import isaaclab.terrains as terrain_gen
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab_physx.physics import PhysxCfg
+from isaaclab_newton.physics import NewtonCfg, MJWarpSolverCfg, NewtonCollisionPipelineCfg, NewtonShapeCfg
+from isaaclab_tasks.utils import PresetCfg
 from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
@@ -368,6 +370,66 @@ class CurriculumCfg:
     lin_vel_cmd_levels = CurrTerm(mdp.lin_vel_cmd_levels)
 
 
+# ---------------------------------------------------------------------------
+# Physics presets
+# ---------------------------------------------------------------------------
+
+
+@configclass
+class VelocityFlatPhysicsCfg(PresetCfg):
+    """Physics backend presets for four-legged velocity tracking on flat terrain.
+
+    Use ``presets=newton_mjwarp`` (or ``presets=newton``) CLI override to
+    select Newton (MuJoCo Warp) backend.
+
+    Newton solver params match Isaac Lab's Go2 flat-terrain defaults.
+    """
+
+    default: PhysxCfg = PhysxCfg(gpu_max_rigid_patch_count=10 * 2**15)
+    newton_mjwarp: NewtonCfg = NewtonCfg(
+        solver_cfg=MJWarpSolverCfg(
+            njmax=65,
+            nconmax=35,
+            cone="pyramidal",
+            impratio=1,
+            integrator="implicitfast",
+        ),
+        num_substeps=1,
+        debug_mode=False,
+    )
+    physx = default
+
+
+@configclass
+class VelocityRoughPhysicsCfg(PresetCfg):
+    """Physics backend presets for four-legged velocity tracking on rough terrain.
+
+    Use ``presets=newton_mjwarp`` (or ``presets=newton``) CLI override to
+    select Newton (MuJoCo Warp) backend.
+
+    Newton solver params match Isaac Lab's rough-terrain locomotion defaults.
+    ``NewtonShapeCfg(margin=0.01)`` is critical for stable contact on
+    triangle-mesh terrain.
+    """
+
+    default: PhysxCfg = PhysxCfg(gpu_max_rigid_patch_count=10 * 2**15)
+    newton_mjwarp: NewtonCfg = NewtonCfg(
+        solver_cfg=MJWarpSolverCfg(
+            njmax=200,
+            nconmax=100,
+            cone="pyramidal",
+            impratio=1.0,
+            integrator="implicitfast",
+            use_mujoco_contacts=False,
+        ),
+        collision_cfg=NewtonCollisionPipelineCfg(max_triangle_pairs=2_500_000),
+        num_substeps=1,
+        debug_mode=False,
+        default_shape_cfg=NewtonShapeCfg(margin=0.01),
+    )
+    physx = default
+
+
 @configclass
 class RobotEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for the locomotion velocity-tracking environment."""
@@ -392,14 +454,8 @@ class RobotEnvCfg(ManagerBasedRLEnvCfg):
         # simulation settings
         self.sim.dt = 0.005
         self.sim.render_interval = self.decimation
-        # IsaacLab 3.0: the upstream ``devel-newton`` branch uses
-        # ``self.sim.newton_cfg.solver_cfg.*`` here, but that attribute path
-        # does not exist in the shipping IsaacLab 3.0 API (it was written
-        # against a preview build). Use the canonical PhysX default instead.
-        # For multi-backend (PhysX + Newton) support, wrap this in a
-        # ``PresetCfg`` — see ``docs/source/migration/migrating_to_isaaclab_3-0.rst``.
         self.sim.physics_material = self.scene.terrain.physics_material
-        self.sim.physics = PhysxCfg(gpu_max_rigid_patch_count=10 * 2**15)
+        self.sim.physics = VelocityFlatPhysicsCfg()
 
         # update sensor update periods
         # we tick all the sensors based on the smallest update period (physics update period)

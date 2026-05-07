@@ -76,19 +76,7 @@ gym.register(
     },
 )
 
-# -- Bipedal walking with Newton (MuJoCo Warp) physics ---
-gym.register(
-    id="Unitree-Go2-Bipedal-Walk-Newton",
-    entry_point=f"{__name__}.bipedal_env:PositiveRewardManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.bipedal_env_cfg:RobotBipedalWalkNewtonEnvCfg",
-        "play_env_cfg_entry_point": f"{__name__}.bipedal_env_cfg:RobotBipedalWalkNewtonPlayEnvCfg",
-        "rsl_rl_cfg_entry_point": f"unitree_rl_lab.tasks.locomotion.agents.rsl_rl_ppo_cfg:BasePPORunnerCfg",
-    },
-)
-
-# -- Bipedal walking on rough terrain (PhysX) ---
+# -- Bipedal walking on rough terrain ---
 gym.register(
     id="Unitree-Go2-Bipedal-Walk-Rough",
     entry_point=f"{__name__}.bipedal_env:PositiveRewardManagerBasedRLEnv",
@@ -100,14 +88,3 @@ gym.register(
     },
 )
 
-# -- Bipedal walking on rough terrain with Newton ---
-gym.register(
-    id="Unitree-Go2-Bipedal-Walk-Rough-Newton",
-    entry_point=f"{__name__}.bipedal_env:PositiveRewardManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.bipedal_env_cfg:RobotBipedalWalkRoughNewtonEnvCfg",
-        "play_env_cfg_entry_point": f"{__name__}.bipedal_env_cfg:RobotBipedalWalkRoughNewtonPlayEnvCfg",
-        "rsl_rl_cfg_entry_point": f"unitree_rl_lab.tasks.locomotion.agents.rsl_rl_ppo_cfg:BasePPORunnerCfg",
-    },
-)
