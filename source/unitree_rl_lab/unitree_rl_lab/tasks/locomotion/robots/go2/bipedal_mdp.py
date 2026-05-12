@@ -292,6 +292,63 @@ def feet_both_airborne(
     return all_airborne * active.float()
 
 
+def bad_bipedal_orientation(
+    env: "ManagerBasedRLEnv",
+    desired_gravity: list[float],
+    max_angle_to_target: float,
+    falling_vel_threshold: float = 0.0,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Terminate when the body is falling away from the bipedal target pose.
+
+    The standard :func:`isaaclab.envs.mdp.bad_orientation` measures the angle
+    between body-Z and world-up, which is geometrically incompatible with a
+    bipedal target where body-Z is intended to be horizontal: the target pose
+    itself sits at angle :math:`\\pi/2` from world-up and would always
+    terminate under any sensible ``limit_angle``.
+
+    This term measures the angle between :attr:`Articulation.data.projected_gravity_b`
+    and ``desired_gravity`` (gravity expressed in the *target* body frame),
+    which is ``0`` at the target pose, :math:`\\pi/2` at the flat quadruped
+    spawn, and :math:`\\pi`` for an upside-down body.
+
+    When ``falling_vel_threshold > 0``, the termination is gated on the
+    world-frame vertical velocity of the base: only robots whose CoM is
+    moving **downward** faster than ``-falling_vel_threshold`` [m/s] are
+    terminated. This distinguishes a robot that is actively falling
+    (high-contact crash imminent) from one that is rising toward the
+    bipedal target through the same angular region. A robot tilting
+    upward has ``root_lin_vel_w.z >= 0`` and is spared.
+
+    Args:
+        env: Environment instance.
+        desired_gravity: Gravity direction in the target-pose body frame
+            (unit vector). See module docstring for the rear/front/flat
+            conventions.
+        max_angle_to_target: Termination threshold [rad]. The robot is
+            terminated when the angle between ``projected_gravity_b`` and
+            ``desired_gravity`` exceeds this value (subject to velocity
+            gate).
+        falling_vel_threshold: Minimum downward speed [m/s] to trigger
+            termination.  ``0`` disables the velocity gate (any pose past
+            the angle threshold terminates). Typical values: ``0.5``--``1.0``.
+        asset_cfg: Robot asset configuration.
+
+    Returns:
+        Boolean per-env termination signal.
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    target = torch.as_tensor(desired_gravity, device=env.device, dtype=torch.float32)
+    cos_threshold = float(torch.cos(torch.tensor(max_angle_to_target)))
+    cos_angle = torch.sum(_tt(asset.data.projected_gravity_b) * target, dim=-1)
+    past_angle = cos_angle < cos_threshold
+    if falling_vel_threshold <= 0.0:
+        return past_angle
+    vel_z = _tt(asset.data.root_lin_vel_w)[:, 2]
+    is_falling = vel_z < -falling_vel_threshold
+    return past_angle & is_falling
+
+
 def joint_deviation_from_default_l1(
     env: "ManagerBasedRLEnv",
     joint_patterns: list[str],

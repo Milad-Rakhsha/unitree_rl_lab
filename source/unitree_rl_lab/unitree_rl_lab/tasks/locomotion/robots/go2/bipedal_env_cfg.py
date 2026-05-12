@@ -1014,24 +1014,25 @@ class BipedalRoughPhysicsCfg(PresetCfg):
     Use ``presets=newton_mjwarp`` (or ``presets=newton``) CLI override to
     select Newton (MuJoCo Warp) backend for sim2sim transfer.
 
-    Bipedal Go2 on rough terrain needs even higher njmax due to
-    triangle-mesh contacts.  ``NewtonShapeCfg(margin=0.01)`` is critical.
-
-    Uses ``integrator="euler"`` + ``solver="newton"`` because the bipedal
-    stance creates extreme contacts on rough terrain that cause NaN with
-    ``implicitfast`` (even at njmax=600).  The euler integrator degrades
-    more gracefully under contact stress.
+    Matches the stock IsaacLab rough-terrain locomotion setup: Newton's
+    own collision pipeline (``use_mujoco_contacts=False``) with a 1 cm
+    shape margin for stable mesh contact.  ``njmax`` / ``nconmax`` are
+    raised relative to the flat preset because the bipedal stance creates
+    more contacts on triangle-mesh terrain.
     """
 
     default: PhysxCfg = PhysxCfg(gpu_max_rigid_patch_count=10 * 2**15)
     newton_mjwarp: NewtonCfg = NewtonCfg(
         solver_cfg=MJWarpSolverCfg(
-            njmax=400,
-            nconmax=200,
+            njmax=600,
+            nconmax=300,
             cone="pyramidal",
-            impratio=1,
+            impratio=1.0,
             integrator="implicitfast",
+            use_mujoco_contacts=False,
         ),
+        collision_cfg=NewtonCollisionPipelineCfg(max_triangle_pairs=2_500_000),
+        default_shape_cfg=NewtonShapeCfg(margin=0.01),
         num_substeps=1,
         debug_mode=False,
     )
@@ -1066,7 +1067,7 @@ class RobotBipedalWalkEnvCfg(ManagerBasedRLEnvCfg):
     curriculum: CurriculumCfg = CurriculumCfg()
 
     def __post_init__(self):
-        self.decimation = 4
+        self.decimation = 8
         self.episode_length_s = 20.0
         self.sim.dt = 0.005
         self.sim.render_interval = self.decimation
@@ -1139,11 +1140,15 @@ class RobotBipedalWalkRoughEnvCfg(RobotBipedalWalkEnvCfg):
         # slams into the ground.
         self.terminations.base_too_low = DoneTerm(
             func=mdp.root_height_below_minimum,
-            params={"minimum_height": 0.25},
+            params={"minimum_height": 0.18},
         )
         self.terminations.bad_orientation = DoneTerm(
-            func=mdp.bad_orientation,
-            params={"limit_angle": 1.0},
+            func=bipedal_mdp.bad_bipedal_orientation,
+            params={
+                "desired_gravity": DESIRED_GRAVITY_REAR,
+                "max_angle_to_target": 1.6,
+                "falling_vel_threshold": 0.5,
+            },
         )
         
         # -- terrain curriculum: disabled for consistent training difficulty
