@@ -1067,7 +1067,7 @@ class RobotBipedalWalkEnvCfg(ManagerBasedRLEnvCfg):
     curriculum: CurriculumCfg = CurriculumCfg()
 
     def __post_init__(self):
-        self.decimation = 8
+        self.decimation = 4
         self.episode_length_s = 20.0
         self.sim.dt = 0.005
         self.sim.render_interval = self.decimation
