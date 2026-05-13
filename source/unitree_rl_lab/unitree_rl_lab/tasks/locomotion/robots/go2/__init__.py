@@ -38,6 +38,9 @@ gym.register(
     },
 )
 
+# -- Stabilization / fall-recovery (scenario-based resets) ---
+#
+# Uses PresetCfg: run with ``presets=newton`` for Newton backend.
 gym.register(
     id="Unitree-Go2-Stabilize",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
@@ -45,17 +48,6 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": f"{__name__}.stabilization_env_cfg:RobotEnvCfg",
         "play_env_cfg_entry_point": f"{__name__}.stabilization_env_cfg:RobotPlayEnvCfg",
-        "rsl_rl_cfg_entry_point": f"unitree_rl_lab.tasks.locomotion.agents.rsl_rl_ppo_cfg:BasePPORunnerCfg",
-    },
-)
-
-gym.register(
-    id="Unitree-Go2-Stabilize-Newton",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.stabilization_env_cfg:RobotNewtonEnvCfg",
-        "play_env_cfg_entry_point": f"{__name__}.stabilization_env_cfg:RobotNewtonPlayEnvCfg",
         "rsl_rl_cfg_entry_point": f"unitree_rl_lab.tasks.locomotion.agents.rsl_rl_ppo_cfg:BasePPORunnerCfg",
     },
 )
