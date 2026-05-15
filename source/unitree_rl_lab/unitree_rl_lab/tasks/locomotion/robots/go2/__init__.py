@@ -38,6 +38,21 @@ gym.register(
     },
 )
 
+# -- Sport / agile velocity tracking on rough terrain ---
+#
+# Higher command ranges (up to 2.0 m/s forward) and relaxed orientation
+# penalty so the robot can tilt during aggressive gaits.
+gym.register(
+    id="Unitree-Go2-Velocity-Rough-Sport",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.sport_env_cfg:RobotSportEnvCfg",
+        "play_env_cfg_entry_point": f"{__name__}.sport_env_cfg:RobotSportPlayEnvCfg",
+        "rsl_rl_cfg_entry_point": f"unitree_rl_lab.tasks.locomotion.agents.rsl_rl_ppo_cfg:BasePPORunnerCfg",
+    },
+)
+
 # -- Stabilization / fall-recovery (scenario-based resets) ---
 #
 # Uses PresetCfg: run with ``presets=newton`` for Newton backend.
@@ -76,6 +91,34 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": f"{__name__}.bipedal_env_cfg:RobotBipedalWalkRoughEnvCfg",
         "play_env_cfg_entry_point": f"{__name__}.bipedal_env_cfg:RobotBipedalWalkRoughPlayEnvCfg",
+        "rsl_rl_cfg_entry_point": f"unitree_rl_lab.tasks.locomotion.agents.rsl_rl_ppo_cfg:BasePPORunnerCfg",
+    },
+)
+
+# -- Bipedal stand-up (quadruped → rear-stance, flat terrain) ---
+#
+# Gentle stand-up policy: starts from quadruped prone, terminates when
+# the robot reaches bipedal stance and holds it calmly.
+# Uses PresetCfg: run with ``presets=newton_mjwarp`` for Newton backend.
+gym.register(
+    id="Unitree-Go2-Bipedal-Standup",
+    entry_point=f"{__name__}.bipedal_env:PositiveRewardManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.standup_env_cfg:RobotStandupEnvCfg",
+        "play_env_cfg_entry_point": f"{__name__}.standup_env_cfg:RobotStandupPlayEnvCfg",
+        "rsl_rl_cfg_entry_point": f"unitree_rl_lab.tasks.locomotion.agents.rsl_rl_ppo_cfg:BasePPORunnerCfg",
+    },
+)
+
+# -- Bipedal stand-up on gentle rough terrain ---
+gym.register(
+    id="Unitree-Go2-Bipedal-Standup-Rough",
+    entry_point=f"{__name__}.bipedal_env:PositiveRewardManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.standup_env_cfg:RobotStandupRoughEnvCfg",
+        "play_env_cfg_entry_point": f"{__name__}.standup_env_cfg:RobotStandupRoughPlayEnvCfg",
         "rsl_rl_cfg_entry_point": f"unitree_rl_lab.tasks.locomotion.agents.rsl_rl_ppo_cfg:BasePPORunnerCfg",
     },
 )
