@@ -37,6 +37,7 @@ _tt = wp.to_torch
 # Go2 joint reference poses (see stabilization_mdp.py for conventions)
 # ---------------------------------------------------------------------------
 
+# Several reference poses the robot might start from
 QUADRUPED_JOINT_POS = [
     -0.1, 0.8, -1.5,   # FR
      0.1, 0.8, -1.5,   # FL
@@ -44,9 +45,27 @@ QUADRUPED_JOINT_POS = [
      0.1, 1.0, -1.5,   # RL
 ]
 
+# Crouched / low quadruped
+QUADRUPED_CROUCHED_POS = [
+    -0.1, 1.2, -2.0,   # FR
+     0.1, 1.2, -2.0,   # FL
+    -0.1, 1.4, -2.0,   # RR
+     0.1, 1.4, -2.0,   # RL
+]
+
+# Splayed legs (wider stance)
+QUADRUPED_SPLAYED_POS = [
+    -0.3, 0.6, -1.2,   # FR
+     0.3, 0.6, -1.2,   # FL
+    -0.3, 0.8, -1.2,   # RR
+     0.3, 0.8, -1.2,   # RL
+]
+
+_POSE_BANK = [QUADRUPED_JOINT_POS, QUADRUPED_CROUCHED_POS, QUADRUPED_SPLAYED_POS]
+
 
 # ---------------------------------------------------------------------------
-# Reset: flat quadruped prone start
+# Reset: diverse quadruped-like starts
 # ---------------------------------------------------------------------------
 
 def reset_quadruped_prone(
@@ -54,25 +73,31 @@ def reset_quadruped_prone(
     env_ids: torch.Tensor,
     # Position randomization
     xy_range: float = 0.3,
-    # Orientation randomization (small tilt to simulate imperfect ground)
-    roll_range: tuple[float, float] = (-0.08, 0.08),
-    pitch_range: tuple[float, float] = (-0.08, 0.08),
-    # Joint noise
-    joint_pos_noise: float = 0.05,
-    joint_vel_noise: float = 0.2,
-    # Spawn height (quadruped standing on 4 legs)
-    base_z: float = 0.34,
+    # Orientation randomization — wide enough to include side-lying
+    roll_range: tuple[float, float] = (-0.4, 0.4),
+    pitch_range: tuple[float, float] = (-0.3, 0.3),
+    # Joint noise — large so the robot sees many starting configs
+    joint_pos_noise: float = 0.3,
+    joint_vel_noise: float = 0.5,
+    # Spawn height range (crouched to normal quadruped)
+    base_z_range: tuple[float, float] = (0.20, 0.38),
+    # Initial velocity range
+    lin_vel_range: float = 0.3,
+    ang_vel_range: float = 0.5,
     # Asset
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ):
-    """Reset envs to a flat quadruped stance — the starting pose for stand-up.
+    """Reset envs to diverse quadruped-like poses for stand-up.
 
-    The robot spawns in a calm four-legged standing pose with small
-    randomization on position, yaw, tilt, and joint offsets. Velocity
-    is near-zero — the episode starts from rest.
+    The robot spawns in a variety of four-legged starting poses:
+    - Normal quadruped, crouched, splayed (randomly selected per env)
+    - Wide orientation DR (roll ±0.4, pitch ±0.3) — includes partial side-lying
+    - Variable height (0.20–0.38m) — crouched to normal
+    - Moderate initial velocity — not always starting from rest
+    - Large joint noise (±0.3 rad) — many different leg configurations
 
-    Called as an Isaac Lab ``EventTerm`` with ``mode="reset"``.
-    Replaces both ``reset_base`` and ``reset_robot_joints``.
+    This ensures the stand-up policy generalizes to any quadruped-like
+    starting condition, not just one specific pose.
     """
     from isaaclab.utils.math import quat_from_euler_xyz
 
@@ -87,22 +112,28 @@ def reset_quadruped_prone(
     root_pos = torch.zeros(n, 3, device=device)
     root_pos[:, 0] = _ru(-xy_range, xy_range, (n,))
     root_pos[:, 1] = _ru(-xy_range, xy_range, (n,))
-    root_pos[:, 2] = base_z + _ru(-0.02, 0.02, (n,))
+    root_pos[:, 2] = _ru(base_z_range[0], base_z_range[1], (n,))
 
     roll = _ru(roll_range[0], roll_range[1], (n,))
     pitch = _ru(pitch_range[0], pitch_range[1], (n,))
     yaw = _ru(-3.14159, 3.14159, (n,))
     root_quat = quat_from_euler_xyz(roll, pitch, yaw)
 
-    # --- Root velocity (near-zero) ---
+    # --- Root velocity (moderate randomization) ---
     root_lin_vel = torch.zeros(n, 3, device=device)
-    root_lin_vel[:, 0] = _ru(-0.1, 0.1, (n,))
-    root_lin_vel[:, 1] = _ru(-0.1, 0.1, (n,))
+    root_lin_vel[:, 0] = _ru(-lin_vel_range, lin_vel_range, (n,))
+    root_lin_vel[:, 1] = _ru(-lin_vel_range, lin_vel_range, (n,))
+    root_lin_vel[:, 2] = _ru(-0.1, 0.1, (n,))
     root_ang_vel = torch.zeros(n, 3, device=device)
+    root_ang_vel[:, 0] = _ru(-ang_vel_range, ang_vel_range, (n,))
+    root_ang_vel[:, 1] = _ru(-ang_vel_range, ang_vel_range, (n,))
+    root_ang_vel[:, 2] = _ru(-ang_vel_range, ang_vel_range, (n,))
 
-    # --- Joint state ---
-    quad_ref = torch.tensor(QUADRUPED_JOINT_POS, device=device, dtype=torch.float32)
-    joint_pos = quad_ref.unsqueeze(0).expand(n, -1) + _ru(
+    # --- Joint state: randomly pick from pose bank per env ---
+    pose_bank = torch.tensor(_POSE_BANK, device=device, dtype=torch.float32)
+    pose_idx = torch.randint(0, len(_POSE_BANK), (n,), device=device)
+    joint_ref = pose_bank[pose_idx]  # (n, 12)
+    joint_pos = joint_ref + _ru(
         -joint_pos_noise, joint_pos_noise, (n, asset.num_joints)
     )
     joint_vel = _ru(-joint_vel_noise, joint_vel_noise, (n, asset.num_joints))
@@ -212,6 +243,69 @@ def orientation_align_velocity_gated(
 
 
 # ---------------------------------------------------------------------------
+# Reward: raw orientation alignment (no velocity gate)
+# ---------------------------------------------------------------------------
+
+def orientation_align_raw(
+    env: "ManagerBasedRLEnv",
+    desired_gravity: list[float],
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Raw orientation alignment toward target pose.
+
+    Returns ``max(0, dot(projected_gravity_b, desired_gravity))`` — a
+    monotonic reward in [0, 1] that increases as the robot tilts toward
+    the bipedal stance, regardless of velocity. This lets the robot
+    actually commit to standing up rather than being penalized for moving.
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    target = torch.as_tensor(
+        desired_gravity, device=env.device, dtype=torch.float32
+    )
+    dot = torch.sum(_tt(asset.data.projected_gravity_b) * target, dim=-1)
+    return torch.clamp(dot, min=0.0)
+
+
+# ---------------------------------------------------------------------------
+# Reward: success bonus (one-time reward when standup completes)
+# ---------------------------------------------------------------------------
+
+def success_bonus(
+    env: "ManagerBasedRLEnv",
+    desired_gravity: list[float],
+    min_cos_angle: float = 0.90,
+    min_base_height: float = 0.45,
+    max_ang_vel: float = 1.0,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Per-step bonus when the robot is in the target upright pose.
+
+    Unlike ``standing_success`` (which needs 50 consecutive steps),
+    this gives immediate reward every step the robot holds the target
+    pose. This provides strong gradient toward the goal without
+    requiring the robot to hold perfectly still for a full second first.
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    target = torch.as_tensor(
+        desired_gravity, device=env.device, dtype=torch.float32
+    )
+
+    cos_angle = torch.sum(
+        _tt(asset.data.projected_gravity_b) * target, dim=-1
+    )
+    orient_ok = cos_angle >= min_cos_angle
+
+    height_ok = _tt(asset.data.root_pos_w)[:, 2] >= min_base_height
+
+    ang_vel_norm = torch.linalg.norm(
+        _tt(asset.data.root_ang_vel_w), dim=-1
+    )
+    calm_ok = ang_vel_norm < max_ang_vel
+
+    return (orient_ok & height_ok & calm_ok).float()
+
+
+# ---------------------------------------------------------------------------
 # Termination: standing success (positive — episode completed!)
 # ---------------------------------------------------------------------------
 
@@ -277,6 +371,80 @@ def standing_success(
     counter[~all_ok] = 0
 
     return counter >= hold_steps
+
+
+# ---------------------------------------------------------------------------
+# Penalty: velocity scaled by orientation (slow down as you get upright)
+# ---------------------------------------------------------------------------
+
+def velocity_near_upright_penalty(
+    env: "ManagerBasedRLEnv",
+    desired_gravity: list[float],
+    onset_cos: float = 0.3,
+    full_cos: float = 0.85,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize velocity proportional to how upright the robot is.
+
+    When flat (cos < onset_cos): no penalty — free to move.
+    As the robot tilts upright: penalty ramps linearly.
+    When near upright (cos > full_cos): full penalty on velocity.
+
+    This lets the robot move freely during the standup transition but
+    forces it to slow down and stabilize as it approaches the target
+    pose. Combines angular + linear velocity into one term.
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    target = torch.as_tensor(
+        desired_gravity, device=env.device, dtype=torch.float32
+    )
+
+    cos_angle = torch.sum(
+        _tt(asset.data.projected_gravity_b) * target, dim=-1
+    )
+    orient_scale = ((cos_angle - onset_cos) / (full_cos - onset_cos)).clamp(0.0, 1.0)
+
+    ang_vel_sq = torch.sum(torch.square(_tt(asset.data.root_ang_vel_w)), dim=-1)
+    lin_vel_sq = torch.sum(torch.square(_tt(asset.data.root_lin_vel_w)), dim=-1)
+
+    # Combined velocity magnitude (weighted: ang vel matters more for stability)
+    vel_penalty = lin_vel_sq + 0.5 * ang_vel_sq
+
+    return orient_scale * vel_penalty
+
+
+# ---------------------------------------------------------------------------
+# Penalty: horizontal drift (world-frame XY linear velocity)
+# ---------------------------------------------------------------------------
+
+def lin_vel_xy_world_l2(
+    env: "ManagerBasedRLEnv",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Quadratic penalty on horizontal (world XY) linear velocity.
+
+    Penalizes backward/forward/sideways drift during stand-up.
+    The robot should stand up in place, not slide around.
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    return torch.sum(torch.square(_tt(asset.data.root_lin_vel_w)[:, :2]), dim=1)
+
+
+# ---------------------------------------------------------------------------
+# Penalty: yaw spin (world-frame Z angular velocity)
+# ---------------------------------------------------------------------------
+
+def ang_vel_z_world_l2(
+    env: "ManagerBasedRLEnv",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Quadratic penalty on yaw rate (world-Z angular velocity).
+
+    Prevents the robot from spinning around the vertical axis
+    during or after standing up.
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    return torch.square(_tt(asset.data.root_ang_vel_w)[:, 2])
 
 
 # ---------------------------------------------------------------------------

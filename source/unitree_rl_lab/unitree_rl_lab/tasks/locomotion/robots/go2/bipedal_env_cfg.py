@@ -607,28 +607,116 @@ class ObservationsCfg:
 
 @configclass
 class RewardsCfg:
-    """Rear-stance bipedal walking rewards.
+    """Reward shaping for Go2 rear-stance bipedal walking.
 
-    Positive terms: velocity tracking, monotonic orientation alignment,
-    rear-foot single-stance air time, rear-foot swing clearance.
-    Negative terms: base-height deviation, vertical velocity, roll/pitch
-    rate, per-joint-group motion L1, front-leg joint-velocity L2, action
-    rate, joint-limit violation, non-foot contacts (thighs / calves /
-    head / front feet), two-rear-feet-airborne flight, in-contact rear
-    foot slide.
+    Overview
+    --------
+    The reward is the sum of 24 terms across 7 functional groups, clipped
+    to ``>= 0`` per step (``only_positive_rewards=True``) so that penalties
+    shape the gradient via term-level differences but never push the agent
+    into a net-negative step.
 
-    No torque / acceleration / energy penalties — they scale with the
-    holding torque the bipedal pose requires and deter exploration of
-    fast-recovery motions.
+    The design follows the arclab-hku Go1 / TumblerNet recipe (npj Robotics
+    2025) with Go2-specific weights tuned across ~10 training iterations to
+    escape a series of local optima (crouch, static V-pose, pronking,
+    shuffling, 4-foot inverted-dog, arm-waving, backward drift at gimbal
+    lock).
+
+    Group summary (positive → negative → shaping → safety):
+
+    ┌─────────────────────────┬────────┬──────────────────────────────────┐
+    │ Group                   │ Weight │ Purpose                          │
+    ├─────────────────────────┼────────┼──────────────────────────────────┤
+    │ 1. TRACKING (positive)  │        │ Drive the walking policy         │
+    │   track_lin_vel_xy      │  +2.0  │ Pitch-invariant yaw-frame fwd/bk │
+    │   track_ang_vel_z       │  +1.0  │ World-frame yaw-rate tracking    │
+    ├─────────────────────────┼────────┼──────────────────────────────────┤
+    │ 2. ORIENTATION (mixed)  │        │ Pull toward bipedal stance       │
+    │   orientation_align     │  +2.0  │ Monotonic rear-stance alignment  │
+    │   orientation_xy        │ -0.03  │ Roll penalty                     │
+    ├─────────────────────────┼────────┼──────────────────────────────────┤
+    │ 3. HEIGHT & STABILITY   │        │ Keep COM at target, damp wobble  │
+    │   base_height           │  -2.0  │ L2 height deviation              │
+    │   lin_vel_z             │  -0.5  │ World-Z vertical velocity        │
+    │   ang_vel_xy            │ -0.05  │ World roll/pitch rate            │
+    ├─────────────────────────┼────────┼──────────────────────────────────┤
+    │ 4. MOTION REGULARIZERS  │        │ Keep joints near default         │
+    │   front_hip_motion      │ -0.25  │ Front hip L1 deviation           │
+    │   front_thigh_motion    │ -0.10  │ Front thigh L1 deviation         │
+    │   front_calf_motion     │ -0.10  │ Front calf L1 deviation          │
+    │   front_leg_joint_vel   │-0.001  │ Front leg joint velocity L2      │
+    │   rear_hip_motion       │ -0.05  │ Rear hip L1 deviation            │
+    │   rear_thigh_motion     │-0.015  │ Rear thigh L1 deviation          │
+    │   rear_calf_motion      │-0.015  │ Rear calf L1 deviation           │
+    ├─────────────────────────┼────────┼──────────────────────────────────┤
+    │ 5. ACTION/LIMIT REGS    │        │ Smooth actions, respect limits   │
+    │   action_rate           │-0.005  │ Action-change-rate L2            │
+    │   dof_pos_limits        │ -10.0  │ Joint position limit violation   │
+    ├─────────────────────────┼────────┼──────────────────────────────────┤
+    │ 6. GAIT SHAPING (mixed) │        │ Produce alternating rear-leg gait│
+    │   rear_feet_air_time    │  +1.5  │ Single-stance air time reward    │
+    │   rear_feet_flight      │ -0.75  │ Both-feet-airborne (pronk) pen.  │
+    │   rear_feet_clearance   │  +0.5  │ Swing foot height reward         │
+    │   rear_feet_slide       │ -0.25  │ In-contact foot slide penalty    │
+    ├─────────────────────────┼────────┼──────────────────────────────────┤
+    │ 7. CONTACT PENALTIES    │        │ Forbid non-foot ground contact   │
+    │   thigh_contact         │  -1.0  │ Any thigh ground contact         │
+    │   calf_contact          │  -1.0  │ Any calf ground contact          │
+    │   front_foot_contact    │  -1.5  │ Front foot contact (anti-cheat)  │
+    │   head_contact          │  -0.5  │ Head ground contact              │
+    └─────────────────────────┴────────┴──────────────────────────────────┘
+
+    Design principles:
+      - No torque / acceleration / energy penalties — they scale with the
+        holding torque the bipedal pose requires and deter exploration of
+        fast-recovery motions.
+      - Front-leg penalties are ~5x heavier than rear-leg penalties because
+        front legs have no functional role in the bipedal gait.
+      - World-frame (gravity-aligned) quantities are used for velocity
+        penalties and yaw tracking because at ~90° body pitch the body
+        frame is rotated so body-X ≈ world-Z.
+      - The pitch-invariant yaw extraction avoids the ZYX Euler gimbal-lock
+        singularity at the bipedal stance angle.
+      - Gait-shaping terms (air time, flight, clearance, slide) work
+        together to break four distinct local optima: shuffling, pronking,
+        dragging, and static stance.
     """
 
-    # -- tracking (ungated) --
+    # ===================================================================
+    # GROUP 1: VELOCITY TRACKING (positive rewards)
+    # ===================================================================
+    # These are the primary task rewards that drive the walking policy.
+    # Both use gravity-aligned (world/yaw) frames, NOT body-frame, because
+    # at the ~90° bipedal tilt body-X points along world-Z — body-frame
+    # ``track_lin_vel_xy_exp`` would ask for *vertical* motion, and
+    # body-frame ``track_ang_vel_z_exp`` would track roll rate instead of
+    # yaw rate.
     #
-    # Yaw-frame (gravity-aligned) linear tracking and world-frame yaw-rate
-    # tracking. The body-frame variants used for flat quadruped locomotion
-    # are wrong here: at the ~90° bipedal tilt, body-X points along world-Z,
-    # so ``track_lin_vel_xy_exp`` asks for vertical motion and
-    # ``track_ang_vel_z_exp`` asks for a roll rate instead of a yaw rate.
+    # Combined max: ~3.0/step (2.0 linear + 1.0 yaw), which is the main
+    # positive gradient the policy follows. The ``only_positive_rewards``
+    # clip means these tracking terms define the reward ceiling; all
+    # penalties below shape the gradient by reducing the total toward zero
+    # but never below it.
+    # ===================================================================
+
+    # ---- track_lin_vel_xy (w=+2.0) ----
+    # WHAT: Pitch-invariant yaw-frame linear velocity tracking.
+    #   Computes exp(-(v_cmd - v_actual)^2 / std^2) in the gravity-aligned
+    #   yaw frame, where yaw is extracted from body-Y horizontal projection
+    #   (not ZYX Euler) to avoid the gimbal-lock singularity at ±π/2 pitch.
+    # WHY: This is the primary task reward — without it the policy has no
+    #   incentive to walk. Weight 2.0 makes it the joint-highest reward
+    #   (tied with orientation_align) so that tracking improvement always
+    #   dominates the marginal cost of increased motion penalties.
+    # WEIGHT RATIONALE: 2.0 chosen so marginal tracking improvement from
+    #   0 → 0.5 m/s (Δr ≈ +0.8) exceeds the marginal motion penalty
+    #   increase (Δr ≈ -0.3), ensuring the policy is always incentivised
+    #   to walk rather than stand still.
+    # INTERACTIONS: Paired with rear_feet_air_time (+1.5) and
+    #   rear_feet_clearance (+0.5) which shape *how* the policy walks;
+    #   this term only rewards *that* it walks. std=sqrt(0.5) is wide
+    #   enough that a ~0.5 m/s tracking error during early walking still
+    #   yields a meaningful positive gradient.
     #
     # EXPERIMENTAL (2026-04-18): swapped from the upstream
     # ``track_lin_vel_xy_yaw_frame_exp`` to a local pitch-invariant variant
@@ -649,6 +737,24 @@ class RewardsCfg:
         weight=2.0,
         params={"command_name": "base_velocity", "std": math.sqrt(0.5)},
     )
+    # ---- track_ang_vel_z (w=+1.0) ----
+    # WHAT: World-frame yaw-rate tracking.
+    #   Computes exp(-(w_cmd_z - w_actual_z)^2 / std^2) in the world frame.
+    #   Uses ``track_ang_vel_z_world_exp`` (not body-frame) because at 90°
+    #   body pitch, body-Z is world-X, so body-frame ang_vel_z would track
+    #   roll rate instead of yaw.
+    # WHY: Enables in-place turning and curved walking. Without this term
+    #   the policy learns to walk straight but cannot execute yaw commands.
+    # WEIGHT RATIONALE: 1.0 (half of track_lin_vel_xy) because yaw tracking
+    #   is secondary to forward/backward locomotion and the bipedal stance
+    #   has an intrinsic yaw wobble (~0.5-0.8 rad/s) that creates a noise
+    #   floor on the achievable reward. The curriculum threshold for this
+    #   term is lowered to 0.6 * weight (see CurriculumCfg) to account for
+    #   this wobble floor.
+    # INTERACTIONS: Directly gated by the ang_vel_cmd_levels curriculum.
+    #   Interacts with ang_vel_xy penalty (-0.05) which damps excessive
+    #   roll/pitch rate but must not suppress the yaw motion this rewards.
+    #
     # EXPERIMENTAL (2026-04-18): tightened yaw-rate tracking from std=sqrt(4.0)
     # to std=sqrt(1.0) and bumped weight 0.75 -> 1.0. The prior kernel was
     # effectively flat over the entire command range (``exp(-1/4) ~= 0.78`` at
@@ -665,21 +771,88 @@ class RewardsCfg:
         params={"command_name": "base_velocity", "std": math.sqrt(1.0)},
     )
 
-    # -- orientation (monotonic pull toward rear-stance, + small xy penalty) --
-    #
-    # Weight bumped from 0.8 -> 2.0 so the marginal reward of going from a
-    # partial crouch (dot~=0.5) to a full bipedal stance (dot=1.0) dominates
-    # the joint-motion penalties that grow with rear-leg extension.
+    # ===================================================================
+    # GROUP 2: ORIENTATION (positive alignment + small roll penalty)
+    # ===================================================================
+    # These terms pull the robot from the flat quadruped spawn toward the
+    # target bipedal stance (body pitched ~90°, nose up). The alignment
+    # reward is the other dominant positive term (tied with tracking at
+    # +2.0) and is critical for the stand-up phase of each episode.
+    # The roll penalty is intentionally tiny to avoid fighting the large
+    # projected-gravity x-component inherent in the bipedal stance.
+    # ===================================================================
+
+    # ---- orientation_align (w=+2.0) ----
+    # WHAT: Monotonic pull toward the rear-stance target orientation.
+    #   Computes max(0, dot(projected_gravity_body, desired_gravity)),
+    #   where desired_gravity = [-1, 0, 0] (world-down maps to -body-X
+    #   when the body is pitched +π/2). The max(0, ...) makes the reward
+    #   monotonically increasing from flat (dot≈0) to bipedal (dot=1).
+    # WHY: Without this term the policy has no gradient to stand up from
+    #   the flat quadruped spawn. It is the bridge between "lying flat"
+    #   and "standing bipedally" before tracking rewards become meaningful.
+    # WEIGHT RATIONALE: Bumped from 0.8 → 2.0 so the marginal reward of
+    #   going from a partial crouch (dot≈0.5) to full bipedal (dot=1.0)
+    #   is +1.0, which dominates the marginal joint-motion penalties that
+    #   grow with rear-leg extension (~0.3). At 0.8 the penalty cost of
+    #   standing exceeded the alignment gain, trapping the policy in a
+    #   permanent crouch.
+    # INTERACTIONS: Works with base_height (-2.0) which pulls the COM up;
+    #   together they reward the stand-up motion from two complementary
+    #   angles (tilt + height). Pairs with front_foot_contact (-1.5) to
+    #   prevent the "4-foot inverted dog" cheat where the body tilts 90°
+    #   but stands on all four feet.
     orientation_align = RewTerm(
         func=bipedal_mdp.orientation_align,
         weight=2.0,
         params={"desired_gravity": DESIRED_GRAVITY_REAR},
     )
-    # Penalises roll (proj_grav_b.y^2) — the large x-component in the
-    # target stance is tolerated because the weight is tiny.
+    # ---- orientation_xy (w=-0.03) ----
+    # WHAT: Roll penalty. Computes proj_grav_body.y^2 (squared y-component
+    #   of the projected gravity vector in body frame). A pure bipedal
+    #   stance with zero roll has proj_grav_body.y = 0.
+    # WHY: Discourages lateral body tilt (roll) which indicates the robot
+    #   is leaning sideways. Without this, the policy sometimes finds
+    #   asymmetric leaning poses that satisfy orientation_align but are
+    #   unstable for walking.
+    # WEIGHT RATIONALE: Very small (-0.03) because the projected gravity
+    #   x-component is large (~1.0) in the target bipedal stance, and a
+    #   stronger penalty on the full x^2 + y^2 would fight the desired
+    #   orientation. Only the y-component is penalised, and even that
+    #   lightly, to avoid discouraging the small lateral sway inherent in
+    #   alternating-leg walking.
+    # INTERACTIONS: Complements orientation_align which only cares about
+    #   the dot product with the target vector (insensitive to roll).
     orientation_xy = RewTerm(func=bipedal_mdp.orientation_xy_sq, weight=-0.03)
 
-    # -- height & stability --
+    # ===================================================================
+    # GROUP 3: HEIGHT & STABILITY (negative penalties)
+    # ===================================================================
+    # These three terms penalise deviations from the desired COM position
+    # and damp oscillatory body motion. They must be soft enough that the
+    # natural COM bob and sway of a walking gait is affordable — earlier
+    # iterations with stronger weights (-3.0 height, -2.0 lin_vel_z)
+    # turned "stand perfectly still" into the globally cheapest strategy,
+    # killing any walking exploration.
+    # ===================================================================
+
+    # ---- base_height (w=-2.0) ----
+    # WHAT: L2 penalty on world-frame base height deviation from target.
+    #   Computes (z_actual - z_target)^2 where z_target = 0.55 m (the
+    #   approximate COM height of a Go2 standing on its rear legs).
+    # WHY: Pulls the robot upward from the flat spawn (z ≈ 0.28 m) toward
+    #   the bipedal height. Also prevents the policy from crouching or
+    #   collapsing during walking to avoid motion penalties.
+    # WEIGHT RATIONALE: -2.0, previously -3.0 (needed to escape the
+    #   initial crouch local optimum) then softened to -1.0 (once stance
+    #   is solved the penalty was just punishing COM bob), then raised
+    #   back to -2.0 to maintain a strong stand-up gradient while still
+    #   permitting walking oscillation. The L2 form means the penalty
+    #   scales quadratically — a 5 cm bob costs 0.005, tolerable; a 15 cm
+    #   drop costs 0.045, substantial.
+    # INTERACTIONS: Works with orientation_align (+2.0) to incentivise
+    #   standing up. Interacts with lin_vel_z (-0.5) which damps the
+    #   vertical velocity component of the COM bob.
     #
     # ``base_height`` weight softened from -3.0 -> -1.0. The strong -3.0
     # was needed to pull the robot out of the quadruped crouch, but once
@@ -694,23 +867,59 @@ class RewardsCfg:
         weight=-2.0,
         params={"target_height": BIPEDAL_TARGET_BASE_Z},
     )
-    # World-frame (gravity-aligned) versions so these penalties do not
-    # collide with the tilted body at the bipedal stance — the body-frame
-    # ``lin_vel_z_l2`` would penalise *horizontal* motion, and the body-frame
-    # ``ang_vel_xy_l2`` would penalise the yaw rate the command is tracking.
+    # ---- lin_vel_z (w=-0.5) ----
+    # WHAT: World-frame vertical (gravity-direction) velocity L2 penalty.
+    #   Computes v_z_world^2. Uses the world-frame variant, not body-frame,
+    #   because at ~90° tilt body-X ≈ world-Z — body-frame ``lin_vel_z_l2``
+    #   would penalise *horizontal* locomotion motion.
+    # WHY: Damps vertical COM oscillation (bouncing). Excessive vertical
+    #   velocity wastes energy and indicates unstable gait dynamics.
+    # WEIGHT RATIONALE: -0.5, softened from -2.0. At -2.0, lifting a leg
+    #   to step inherently produces enough world-Z velocity to cost ~0.25
+    #   per step, exceeding the marginal tracking reward of early walking.
+    #   -0.5 keeps the penalty meaningful for large vertical excursions
+    #   (falls, jumps) while permitting the small vertical motion of normal
+    #   walking.
+    # INTERACTIONS: Complements base_height (-2.0) which penalises
+    #   position error while this penalises velocity (derivative damping).
     lin_vel_z = RewTerm(func=bipedal_mdp.lin_vel_z_world_l2, weight=-0.5)
+
+    # ---- ang_vel_xy (w=-0.05) ----
+    # WHAT: World-frame roll and pitch angular velocity L2 penalty.
+    #   Computes w_x_world^2 + w_y_world^2. Uses world-frame because
+    #   body-frame ``ang_vel_xy_l2`` at ~90° tilt would penalise the yaw
+    #   rate that track_ang_vel_z is actively rewarding.
+    # WHY: Damps roll and pitch oscillation of the body, which manifests
+    #   as wobbling during stance and walking. A bipedal stance is an
+    #   inverted pendulum — without damping, the policy can oscillate
+    #   through the equilibrium point.
+    # WEIGHT RATIONALE: -0.05, intentionally small. The bipedal stance
+    #   inherently has larger roll/pitch rates than a quadruped because
+    #   only two feet provide support. A stronger penalty would suppress
+    #   the dynamic weight shifts needed for walking.
+    # INTERACTIONS: Works with lin_vel_z (-0.5) and base_height (-2.0)
+    #   to collectively stabilise the body. Must not be so strong that it
+    #   fights the lateral weight shift required for single-stance walking
+    #   (rewarded by rear_feet_air_time).
     ang_vel_xy = RewTerm(func=bipedal_mdp.ang_vel_xy_world_l2, weight=-0.05)
 
-    # -- motion regularizers (L1 against default joint pos) --
+    # ===================================================================
+    # GROUP 4: MOTION REGULARIZERS (negative L1/L2 penalties)
+    # ===================================================================
+    # Per-joint-group L1 deviation from default_joint_pos, split into
+    # front legs (should stay tucked) and rear legs (must move to walk).
     #
-    # Split front / rear: the rear legs carry the entire body weight and
-    # must sweep through a large range to actually walk, so their L1
-    # penalties are scaled down relative to the front legs. Front legs
-    # are regularised harder to keep them tucked close to their default
-    # positions (so the body cannot pivot forward onto them *and* the
-    # arms don't swing around as visual noise). Removing the rear L1
-    # entirely lets the rear legs splay behind the body in a static
-    # V-pose, so keep a small non-zero weight there.
+    # Design: Front-leg penalties are ~5x heavier than rear-leg penalties
+    # because front legs have NO functional role in bipedal walking — any
+    # front-leg motion is either visual noise (arm-waving), a cheat
+    # (pivoting forward onto front feet), or wasted inertia-shaping.
+    # Rear-leg penalties are small but non-zero to prevent the static
+    # V-pose (legs splayed behind the body) which satisfies orientation
+    # and height rewards without walking.
+    #
+    # The front_leg_joint_vel L2 term is a dynamic damper that targets
+    # high-frequency arm oscillation about default, which the position
+    # L1 penalty alone cannot suppress.
     #
     # EXPERIMENTAL (2026-04-18): front-leg L1 weights roughly doubled
     # (hip -0.15 -> -0.25, thigh -0.05 -> -0.10, calf -0.05 -> -0.10)
@@ -718,21 +927,79 @@ class RewardsCfg:
     # legs have no functional role in a bipedal gait and each joint was
     # drifting +/- 0.5 rad from default in the earlier run; the policy
     # was effectively using them as free inertia-shaping actuators.
+    # ===================================================================
+
+    # ---- front_hip_motion (w=-0.25) ----
+    # WHAT: L1 deviation of front hip joints (FL_hip, FR_hip) from their
+    #   default positions. Computes sum(|q - q_default|) over front hips.
+    # WHY: Keeps front hips tucked. The hip joint has the largest lever
+    #   arm for swinging the front legs outward, so it gets the heaviest
+    #   front-leg penalty.
+    # WEIGHT RATIONALE: -0.25 (5x rear_hip at -0.05). Doubled from -0.15
+    #   to suppress the arm-waving artefact. At -0.25, a 0.5 rad hip
+    #   deviation costs 0.125/step — comparable to the marginal tracking
+    #   reward lost by holding still, so the policy cannot use front-hip
+    #   actuation for "free" inertia shaping.
+    # INTERACTIONS: Reinforced by front_leg_joint_vel (-0.001) which damps
+    #   high-frequency oscillation. Together they ensure front legs stay
+    #   tucked both in position and velocity.
     front_hip_motion = RewTerm(
         func=bipedal_mdp.joint_deviation_from_default_l1,
         weight=-0.25,
         params={"joint_patterns": ["F[LR]_hip_joint"]},
     )
+    # ---- front_thigh_motion (w=-0.10) ----
+    # WHAT: L1 deviation of front thigh joints (FL_thigh, FR_thigh) from
+    #   default. Computes sum(|q - q_default|) over front thighs.
+    # WHY: Keeps front thighs folded close to the body. Prevents the
+    #   front legs from extending forward (which could reach the ground
+    #   and enable the 4-foot splay cheat).
+    # WEIGHT RATIONALE: -0.10, half the hip weight. Thigh deviation is
+    #   less destabilising than hip deviation because the thigh's moment
+    #   arm for CoM shift is shorter. Doubled from -0.05 alongside the
+    #   hip increase.
+    # INTERACTIONS: Works with front_foot_contact (-1.5) — position
+    #   regularisation prevents reaching; contact penalty punishes arrival.
     front_thigh_motion = RewTerm(
         func=bipedal_mdp.joint_deviation_from_default_l1,
         weight=-0.10,
         params={"joint_patterns": ["F[LR]_thigh_joint"]},
     )
+
+    # ---- front_calf_motion (w=-0.10) ----
+    # WHAT: L1 deviation of front calf joints (FL_calf, FR_calf) from
+    #   default. Computes sum(|q - q_default|) over front calves.
+    # WHY: Prevents front lower legs from extending. Even if thighs are
+    #   tucked, an extended calf can reach the ground or create visual
+    #   noise.
+    # WEIGHT RATIONALE: -0.10, same as thigh. Doubled from -0.05. The
+    #   calf extension range is limited by joint limits so this weight
+    #   primarily prevents the residual motion within the limit envelope.
+    # INTERACTIONS: Same group as front_hip and front_thigh — together
+    #   they keep the entire front leg chain at default.
     front_calf_motion = RewTerm(
         func=bipedal_mdp.joint_deviation_from_default_l1,
         weight=-0.10,
         params={"joint_patterns": ["F[LR]_calf_joint"]},
     )
+
+    # ---- front_leg_joint_vel (w=-0.001) ----
+    # WHAT: L2 penalty on front-leg joint velocities. Computes
+    #   sum(q_dot^2) over all 6 front-leg joints (FL_hip, FL_thigh,
+    #   FL_calf, FR_hip, FR_thigh, FR_calf).
+    # WHY: The L1 position penalties above pull the arms toward default
+    #   but do NOT punish high-frequency oscillation *about* default.
+    #   The policy was observed rapidly flicking the arms to shift CoM
+    #   with near-zero mean deviation. This term is a direct dynamic
+    #   damper on the arms.
+    # WEIGHT RATIONALE: -0.001, intentionally tiny. Tuned so an idle-arm
+    #   policy pays ~0/step while a fast-waving arm (|q_dot| ~ 5 rad/s
+    #   per joint × 6 joints) pays ~0.15/step. Heavier weights would
+    #   slow down the front-leg return to default after a perturbation.
+    # INTERACTIONS: Complements the L1 position penalties above. Position
+    #   penalties control *where* the arms are; this controls *how fast*
+    #   they move.
+    #
     # EXPERIMENTAL (2026-04-18): direct L2 penalty on front-leg joint
     # velocities. The position-deviation penalties above pull the arms
     # back toward default but do not punish high-frequency oscillation
@@ -748,23 +1015,87 @@ class RewardsCfg:
             "asset_cfg": SceneEntityCfg("robot", joint_names=["F[LR]_.*"]),
         },
     )
+    # ---- rear_hip_motion (w=-0.05) ----
+    # WHAT: L1 deviation of rear hip joints (RL_hip, RR_hip) from default.
+    #   Computes sum(|q - q_default|) over rear hips.
+    # WHY: Prevents rear hips from splaying outward in a wide V-pose that
+    #   satisfies orientation and height rewards without requiring actual
+    #   walking. The hip abduction range is the primary degree of freedom
+    #   for forming the V-pose local optimum.
+    # WEIGHT RATIONALE: -0.05, one-fifth of front_hip_motion (-0.25).
+    #   The rear legs must move substantially to walk, so the penalty
+    #   must be small enough that the marginal tracking reward of a walking
+    #   step exceeds the marginal hip deviation cost. Setting this to zero
+    #   produced the V-pose; the current value is the minimum that breaks
+    #   that local optimum.
+    # INTERACTIONS: Balances against track_lin_vel_xy (+2.0) and
+    #   rear_feet_air_time (+1.5) — the walking rewards must exceed the
+    #   motion penalty cost of each step.
     rear_hip_motion = RewTerm(
         func=bipedal_mdp.joint_deviation_from_default_l1,
         weight=-0.05,
         params={"joint_patterns": ["R[LR]_hip_joint"]},
     )
+
+    # ---- rear_thigh_motion (w=-0.015) ----
+    # WHAT: L1 deviation of rear thigh joints (RL_thigh, RR_thigh) from
+    #   default. Computes sum(|q - q_default|).
+    # WHY: Lightly regularises rear thigh position to prevent extreme
+    #   extension/flexion. The thigh is the primary swing actuator during
+    #   walking, so this penalty must be very light.
+    # WEIGHT RATIONALE: -0.015, small enough that a typical walking
+    #   stride (thigh deviation ~0.8 rad) costs only ~0.012/step. This
+    #   is < 1% of the positive reward sum, making it nearly free for
+    #   walking while still penalising the extreme 1.5+ rad deviations
+    #   seen in degenerate poses.
+    # INTERACTIONS: Together with rear_hip and rear_calf motion terms,
+    #   provides a soft restoring force toward a natural posture without
+    #   fighting the gait-shaping terms.
     rear_thigh_motion = RewTerm(
         func=bipedal_mdp.joint_deviation_from_default_l1,
         weight=-0.015,
         params={"joint_patterns": ["R[LR]_thigh_joint"]},
     )
+
+    # ---- rear_calf_motion (w=-0.015) ----
+    # WHAT: L1 deviation of rear calf joints (RL_calf, RR_calf) from
+    #   default. Computes sum(|q - q_default|).
+    # WHY: Same purpose as rear_thigh_motion — light regularisation to
+    #   prevent extreme calf positions. The calf controls foot placement
+    #   height and stride length.
+    # WEIGHT RATIONALE: -0.015, matched to rear_thigh. Both segments of
+    #   the rear leg need equal freedom to produce a walking gait.
+    # INTERACTIONS: Works with rear_feet_clearance (+0.5) and
+    #   rear_feet_slide (-0.25) which shape the foot trajectory; this
+    #   term only constrains the joint angle, not the resulting foot path.
     rear_calf_motion = RewTerm(
         func=bipedal_mdp.joint_deviation_from_default_l1,
         weight=-0.015,
         params={"joint_patterns": ["R[LR]_calf_joint"]},
     )
 
-    # -- action / joint-limit regularizers --
+    # ===================================================================
+    # GROUP 5: ACTION & JOINT-LIMIT REGULARIZERS (negative penalties)
+    # ===================================================================
+    # Smooth the policy's output (action_rate) and enforce hard joint
+    # position limits (dof_pos_limits). These are generic RL regularisers
+    # present in most locomotion reward configs.
+    # ===================================================================
+
+    # ---- action_rate (w=-0.005) ----
+    # WHAT: L2 penalty on the change in action between consecutive steps.
+    #   Computes sum((a_t - a_{t-1})^2) across all 12 joints.
+    # WHY: Encourages temporally smooth actions, reducing jerkiness and
+    #   high-frequency oscillation. Smoother actions transfer better to
+    #   real hardware where actuator bandwidth is limited.
+    # WEIGHT RATIONALE: -0.005, softened from -0.02. At -0.02 the per-step
+    #   penalty reached ~0.25 (14% of the positive reward sum during early
+    #   walking), which strictly disincentivised vigorous motion. -0.005
+    #   keeps regularisation without making stillness the cheapest option.
+    #   The policy must make fast swing-leg action changes to walk at all.
+    # INTERACTIONS: Indirectly interacts with all gait-shaping terms. If
+    #   too strong, it suppresses the rapid leg movements needed for
+    #   rear_feet_air_time and rear_feet_clearance rewards.
     #
     # ``action_rate`` softened -0.02 -> -0.005. The policy must make
     # fast swing-leg action changes to walk at all; at -0.02 the per-step
@@ -772,15 +1103,63 @@ class RewardsCfg:
     # strictly disincentivises vigorous motion. -0.005 keeps regularisation
     # without making stillness the cheapest option.
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.005)
+
+    # ---- dof_pos_limits (w=-10.0) ----
+    # WHAT: Penalty for joint positions that violate the URDF-defined
+    #   position limits. Returns the sum of squared violations (distance
+    #   beyond upper or below lower limit) across all joints.
+    # WHY: Hard joint-limit violations cause simulation instabilities
+    #   (contact explosions, NaN) and are physically impossible on real
+    #   hardware. The high weight makes limit violation the single most
+    #   expensive per-step penalty.
+    # WEIGHT RATIONALE: -10.0, the strongest weight in the config. Even
+    #   a 0.1 rad violation costs 0.1/step, comparable to the full tracking
+    #   reward. This effectively makes joint limits a hard constraint
+    #   within the soft-penalty framework.
+    # INTERACTIONS: Sets the outer boundary for all motion terms. The
+    #   rear-leg motion regularisers (-0.015) gently pull joints inward;
+    #   this term creates a hard wall at the limit.
     dof_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=-10.0)
 
-    # -- gait shaping --
+    # ===================================================================
+    # GROUP 6: GAIT SHAPING (positive rewards + negative penalties)
+    # ===================================================================
+    # These four terms work together to produce a clean alternating
+    # single-stance walking gait on the rear legs. Each term blocks a
+    # specific local optimum:
     #
-    # Rewards the rear feet for single-stance air-times (one foot in the
-    # air at a time), gated on non-zero linear command magnitude. Encourages
-    # an alternating walking gait instead of the shuffling / static stance
-    # observed in earlier runs. Front feet are excluded — they stay tucked
-    # and are penalised separately if they touch the ground.
+    #   rear_feet_air_time (+1.5)  → blocks SHUFFLING (both feet always
+    #                                 on ground, tiny steps)
+    #   rear_feet_flight   (-0.75) → blocks PRONKING (both feet airborne
+    #                                 simultaneously, hopping forward)
+    #   rear_feet_clearance (+0.5) → blocks DRAGGING (swing foot scrapes
+    #                                 along the ground without lifting)
+    #   rear_feet_slide    (-0.25) → blocks SLIDING (stance foot moves
+    #                                 horizontally while loaded)
+    #
+    # All gait terms operate ONLY on rear feet (R[LR]_foot). Front feet
+    # are handled by front_foot_contact penalty (Group 7).
+    # All are gated on non-trivial linear command magnitude — the policy
+    # is not penalised/rewarded for gait quality while standing in place.
+    # ===================================================================
+
+    # ---- rear_feet_air_time (w=+1.5) ----
+    # WHAT: Single-stance air-time reward on rear feet. Rewards air time
+    #   on each rear foot individually, but ONLY when the other foot is
+    #   in contact (single-stance phase). When both feet are airborne
+    #   the reward is zero (not negative). Gated on |lin_vel_cmd| > 0.
+    # WHY: Velocity tracking alone produced a shuffling stance that barely
+    #   lifted either rear foot. This term actively pushes the gait toward
+    #   a clean alternating single-stance walking pattern.
+    # WEIGHT RATIONALE: +1.5 (raised from 1.0). The higher weight makes
+    #   the single-stance reward large enough to dominate the local-optimum
+    #   rewards from shuffling. At 1.0, the motion penalty cost of lifting
+    #   a leg occasionally exceeded the air-time reward.
+    # INTERACTIONS: Complemented by rear_feet_flight (-0.75) which makes
+    #   two-feet-airborne negative (this term only makes it zero). Together
+    #   they create a strong preference for alternating single-stance.
+    #   Also interacts with rear_feet_clearance (+0.5) which rewards the
+    #   foot *height* during the air phase this term rewards the *duration* of.
     #
     # EXPERIMENTAL (2026-04-18): threshold lowered 0.4 -> 0.25 and weight
     # raised 1.0 -> 1.5. The 0.4 s target required the rear-leg swing to be
@@ -798,6 +1177,25 @@ class RewardsCfg:
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names="R[LR]_foot"),
         },
     )
+    # ---- rear_feet_flight (w=-0.75) ----
+    # WHAT: Both-feet-airborne (pronk/flight) penalty. Returns 1.0 per
+    #   step when BOTH rear feet are simultaneously off the ground and
+    #   the linear command magnitude is non-trivial; 0.0 otherwise.
+    # WHY: The air-time reward above is zero (not negative) when both feet
+    #   are airborne, so pronking forward was a free (zero-cost) local
+    #   optimum — the policy could accumulate tracking reward without
+    #   learning alternating leg coordination. This term makes the
+    #   two-feet-airborne state strictly negative.
+    # WEIGHT RATIONALE: -0.75, half the air-time reward (+1.5). This means
+    #   a single timestep of double-flight costs 0.75 while a single
+    #   timestep of correct single-stance earns 1.5, creating a 2:1
+    #   preference ratio for walking over pronking.
+    # INTERACTIONS: Directly paired with rear_feet_air_time (+1.5) —
+    #   together they create the asymmetric reward landscape:
+    #     single-stance: +1.5 (rewarded)
+    #     double-stance:  0.0 (neutral)
+    #     double-flight: -0.75 (penalised)
+    #
     # EXPERIMENTAL (2026-04-18): explicit pronk / flight-phase penalty.
     # ``feet_air_time_positive_biped`` is zero when both rear feet are
     # airborne simultaneously but does not *punish* that state, so pronking
@@ -814,6 +1212,26 @@ class RewardsCfg:
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names="R[LR]_foot"),
         },
     )
+    # ---- rear_feet_clearance (w=+0.5) ----
+    # WHAT: Swing-foot height reward (Spot-style). Computes
+    #   exp(-(z_foot - z_target)^2 / std^2) for each rear foot, gated by
+    #   tanh(mult * |v_horizontal_foot|) so only moving (swing) feet
+    #   contribute — stationary stance feet are zeroed out.
+    #   target_height=0.10 m, std=0.05, tanh_mult=2.0.
+    # WHY: The air-time reward only requires a foot to be off the ground,
+    #   not that it meaningfully *lifts*. The policy found a dragging
+    #   local optimum where the swing foot scrapes just above the floor,
+    #   satisfying the contact sensor threshold without clearing obstacles.
+    #   This term rewards bringing the swing foot to 10 cm height.
+    # WEIGHT RATIONALE: +0.5 (1/3 of air_time at +1.5). Moderate because
+    #   the clearance target is aspirational — not every step needs to
+    #   reach exactly 10 cm — but strong enough that dragging (z≈0 cm,
+    #   reward≈0.02) is clearly worse than lifting (z=10 cm, reward≈1.0).
+    # INTERACTIONS: Paired with rear_feet_slide (-0.25) which penalises
+    #   the other half of dragging (foot in contact AND moving). Together:
+    #     clearance rewards foot *height* during swing
+    #     slide penalises foot *velocity* during stance
+    #
     # EXPERIMENTAL (2026-04-18): swing-foot clearance reward. The
     # single-stance air-time reward only requires that one foot be in the
     # air, not that it meaningfully *lift* — the policy found a dragging
@@ -836,6 +1254,27 @@ class RewardsCfg:
             "command_name": "base_velocity",
         },
     )
+    # ---- rear_feet_slide (w=-0.25) ----
+    # WHAT: In-contact foot-slide penalty. Computes horizontal foot
+    #   velocity magnitude for each rear foot that is in contact with the
+    #   ground (force > threshold). Penalises stance-foot sliding.
+    # WHY: Penalises horizontal foot velocity while loaded — the other
+    #   half of dragging that the clearance reward cannot see. Dragging
+    #   means the foot is simultaneously in contact AND moving horizontally;
+    #   clearance rewards height during swing, slide penalises velocity
+    #   during stance.
+    # WEIGHT RATIONALE: -0.25, moderate. The reward grows linearly with
+    #   slide speed and is summed across feet. A small weight is
+    #   intentional: every heel-strike has a brief slide transient, and
+    #   the penalty should not discourage that natural contact event. At
+    #   -0.25, the typical heel-strike slip (~0.1 m/s for ~0.05 s) costs
+    #   only ~0.003/step, but persistent dragging (~0.5 m/s) costs
+    #   ~0.125/step.
+    # INTERACTIONS: Paired with rear_feet_clearance (+0.5) — they
+    #   address the same dragging problem from opposite ends (swing height
+    #   vs. stance velocity). Also interacts with rear_feet_air_time
+    #   (+1.5) which rewards the air phase between stance phases.
+    #
     # EXPERIMENTAL (2026-04-18): in-contact foot-slide penalty. Directly
     # punishes horizontal foot velocity while the foot is loaded, which is
     # the other half of the dragging behaviour the clearance reward cannot
@@ -852,13 +1291,21 @@ class RewardsCfg:
         },
     )
 
-    # -- contact penalties --
+    # ===================================================================
+    # GROUP 7: CONTACT PENALTIES (negative penalties)
+    # ===================================================================
+    # Penalise non-foot body parts touching the ground (thigh, calf, head)
+    # and specifically forbid front-foot ground contact. These are safety
+    # barriers and anti-cheat mechanisms:
     #
-    # ``thigh_contact`` / ``calf_contact`` / ``head_contact`` penalise
-    # non-foot body parts touching the ground. ``front_foot_contact``
-    # forbids the front feet from supporting body weight — the direct
-    # anti-cheat for the "4-foot splay" pose where the policy tilts the
-    # body ~90 deg and stands on all four feet.
+    #   thigh_contact (-1.0)      → Prevents sitting/kneeling poses
+    #   calf_contact (-1.0)       → Prevents knee-dragging
+    #   front_foot_contact (-1.5) → Blocks the "4-foot inverted dog" cheat
+    #   head_contact (-0.5)       → Prevents face-plants and headstands
+    #
+    # ``undesired_contacts`` returns the *number* of bodies in contact
+    # above threshold, so these penalties scale linearly with the number
+    # of offending links.
     #
     # EXPERIMENTAL (2026-04-18): softened ``calf_contact`` (-3.0 -> -1.0)
     # and ``front_foot_contact`` (-1.5 -> -0.5). ``undesired_contacts``
@@ -872,6 +1319,21 @@ class RewardsCfg:
     # model. The softer weights keep the anti-cheat direction but stop
     # making it the dominant gradient at spawn, so the policy can afford
     # a controlled stand-up instead of an overshoot.
+    # ===================================================================
+
+    # ---- thigh_contact (w=-1.0) ----
+    # WHAT: Penalty for any thigh link (FL/FR/RL/RR_thigh) touching the
+    #   ground with force > 1.0 N. Returns count of offending thighs.
+    # WHY: Thigh-ground contact indicates kneeling, sitting, or falling
+    #   poses that are not bipedal walking. In the bipedal stance only
+    #   rear feet should touch the ground.
+    # WEIGHT RATIONALE: -1.0 per offending thigh. Comparable to
+    #   orientation_align (+2.0) so a two-thigh contact (-2.0) roughly
+    #   cancels the orientation reward, making kneeling unrewarding.
+    # INTERACTIONS: Works with the hip_contact termination in
+    #   TerminationsCfg — thigh contact gets a penalty, hip contact
+    #   terminates the episode. Together they create a gradient from
+    #   "thigh brush" (recoverable, penalised) to "hip sit" (terminal).
     thigh_contact = RewTerm(
         func=mdp.undesired_contacts,
         weight=-1.0,
@@ -880,6 +1342,18 @@ class RewardsCfg:
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_thigh"),
         },
     )
+    # ---- calf_contact (w=-1.0) ----
+    # WHAT: Penalty for any calf link (FL/FR/RL/RR_calf) touching the
+    #   ground with force > 1.0 N. Returns count of offending calves.
+    # WHY: Calf-ground contact indicates knee-dragging or collapsed poses.
+    #   Even rear calves should not touch the ground during walking —
+    #   only rear feet.
+    # WEIGHT RATIONALE: -1.0, matched to thigh_contact. Softened from
+    #   -3.0 to prevent the over-aggressive stand-up (see EXPERIMENTAL
+    #   note in group header).
+    # INTERACTIONS: See thigh_contact. At the flat quadruped spawn, calves
+    #   briefly brush the ground; a lighter weight ensures this transient
+    #   does not dominate the initial gradient.
     calf_contact = RewTerm(
         func=mdp.undesired_contacts,
         weight=-1.0,
@@ -888,6 +1362,25 @@ class RewardsCfg:
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_calf"),
         },
     )
+
+    # ---- front_foot_contact (w=-1.5) ----
+    # WHAT: Penalty for front feet (FL_foot, FR_foot) touching the ground
+    #   with force > 1.0 N. Returns count of offending front feet (0, 1, or 2).
+    # WHY: This is the direct anti-cheat for the "4-foot inverted dog"
+    #   pose observed in the 2026-04-18_12-28-55 run, where the policy
+    #   tilts the body ~90° and stands on all four feet (rear splayed
+    #   behind, front reaching to the ground). That pose satisfies
+    #   orientation_align and base_height rewards without learning bipedal
+    #   walking. This term makes front-foot support strictly expensive.
+    # WEIGHT RATIONALE: -1.5 per front foot, the heaviest contact penalty.
+    #   At two front feet in contact (-3.0 total), this exceeds
+    #   orientation_align (+2.0), ensuring the 4-foot pose is net-negative.
+    #   The weight must remain above orientation_align / 2 to break the
+    #   cheat at every orientation angle.
+    # INTERACTIONS: Reinforced by front_hip/thigh/calf_motion penalties
+    #   which prevent the front legs from reaching toward the ground in
+    #   the first place. This is the "last line of defence" if position
+    #   regularisation fails.
     front_foot_contact = RewTerm(
         func=mdp.undesired_contacts,
         weight=-1.5,
@@ -896,6 +1389,19 @@ class RewardsCfg:
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names="F[LR]_foot"),
         },
     )
+
+    # ---- head_contact (w=-0.5) ----
+    # WHAT: Penalty for head links (Head_*) touching the ground with
+    #   force > 1.0 N.
+    # WHY: Prevents face-plants and headstand-like poses. Head contact
+    #   indicates the robot has fallen forward or is in an inverted pose.
+    # WEIGHT RATIONALE: -0.5, lighter than other contact penalties. The
+    #   head rarely contacts the ground during normal training (it's at
+    #   the top of the body in the bipedal stance), so a lighter weight
+    #   suffices as a guard rail.
+    # INTERACTIONS: Minimal — head contact is a rare failure mode.
+    #   Works with base_contact termination as an early warning before
+    #   the base itself hits the ground.
     head_contact = RewTerm(
         func=mdp.undesired_contacts,
         weight=-0.5,
