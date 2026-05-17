@@ -103,6 +103,33 @@ gym.register(
     },
 )
 
+# -- Pace gait on flat terrain ---
+#
+# Lateral pacing gait: same-side legs move in unison (FL+RL, then FR+RR).
+# Produces a characteristic lateral rocking motion.
+gym.register(
+    id="Unitree-Go2-Velocity-Pace",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.pace_env_cfg:RobotPaceEnvCfg",
+        "play_env_cfg_entry_point": f"{__name__}.pace_env_cfg:RobotPacePlayEnvCfg",
+        "rsl_rl_cfg_entry_point": f"unitree_rl_lab.tasks.locomotion.agents.rsl_rl_ppo_cfg:BasePPORunnerCfg",
+    },
+)
+
+# -- Pace gait on gentle rough terrain ---
+gym.register(
+    id="Unitree-Go2-Velocity-Rough-Pace",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.pace_env_cfg:RobotPaceRoughEnvCfg",
+        "play_env_cfg_entry_point": f"{__name__}.pace_env_cfg:RobotPaceRoughPlayEnvCfg",
+        "rsl_rl_cfg_entry_point": f"unitree_rl_lab.tasks.locomotion.agents.rsl_rl_ppo_cfg:BasePPORunnerCfg",
+    },
+)
+
 # -- Stabilization / fall-recovery (scenario-based resets) ---
 #
 # Uses PresetCfg: run with ``presets=newton`` for Newton backend.
