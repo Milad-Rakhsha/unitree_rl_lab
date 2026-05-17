@@ -4,30 +4,31 @@
 #
 # Joystick shortcuts (from FixStand / Stabilize) — D-pad layout:
 #
-# LB modifier = UNGUARDED gaits (no Surprise gate). LT modifier = GUARDED.
+# LT modifier = UNGUARDED gaits (no Surprise gate). LB modifier = GUARDED.
 #
-#                       LB + up                        LT + up
+#                       LT + up                        LB + up
 #                   BipedalStandUp                 BipedalStandUpGuarded
 #                        ...                            ...
 #                   BipedalRear                    BipedalRearGuarded
 #                  (bipedal walk)              (bipedal walk + Surprise)
 #                        ^                              ^
 #                        |                              |
-#       LB + left <----- + ----> LB + right             |
-#         Pace                     Sport                |
-#  (rough_pace gait)        (rough_sport gait)          |
+#       LT + left <----- + ----> LT + right             |
+#     (unassigned)               Sport                  |
+#                          (rough_sport gait)           |
+#       Pace: disabled in FSM list                      |
 #                        |
 #                        v                              v
-#                     LB + down                      LT + down
+#                     LT + down                      LB + down
 #                     Velocity                    VelocityGuarded
 #                  (rough quad trot)         (rough quad trot + Surprise)
 #
-#   LT + left, LT + right                          (reserved, unassigned)
+#   LB + left, LB + right                          (reserved, unassigned)
 #
 # Bipedal entry chain (internal, invisible to the operator):
 #
-#   FixStand --(LB+up)--> BipedalStandUp         --(auto, 2 s)--> BipedalRear
-#   FixStand --(LT+up)--> BipedalStandUpGuarded  --(auto, 2 s)--> BipedalRearGuarded
+#   FixStand --(LT+up)--> BipedalStandUp         --(auto, 2 s)--> BipedalRear
+#   FixStand --(LB+up)--> BipedalStandUpGuarded  --(auto, 2 s)--> BipedalRearGuarded
 #
 #   The hand-off delay is the ``auto_transition.duration_s`` field of each
 #   BipedalStandUp* state — tune that, not the walking policy, if the robot
@@ -53,7 +54,7 @@
 # Stabilize does NOT auto-return. Once the robot is stable, the operator
 # picks the next state explicitly using the same D-pad layout as FixStand.
 #
-# Plain (LB-prefixed) walking policies have surprise disabled, so the only
+# Plain (LT-prefixed) walking policies have surprise disabled, so the only
 # exits are joystick (LT+A / LT+B / START) or a fall termination.
 #
 # Each RL policy_dir must contain the artifacts from that training run:
@@ -100,9 +101,13 @@ FSM:
     BipedalStandUpGuarded:
       id: 9
       type: RLBase
+    # Pace is currently disabled — policy not yet validated for deployment.
+    # To re-enable: flip ``enabled: true`` and restore the ``LB + left``
+    # bindings in FixStand / Stabilize transitions below.
     Pace:
       id: 10
       type: RLBase
+      enabled: false
     Sport:
       id: 11
       type: RLBase
@@ -135,19 +140,19 @@ FSM:
   FixStand:
     transitions:
       Passive:                LT + B.on_pressed
-      # LB modifier = UNGUARDED gaits (no Surprise gate).
-      Velocity:               LB + down.on_pressed
-      Pace:                   LB + left.on_pressed
-      Sport:                  LB + right.on_pressed
+      # LT modifier = UNGUARDED gaits (no Surprise gate).
+      # LT + left = Pace — currently unbound (policy disabled in FSM list).
+      Velocity:               LT + down.on_pressed
+      Sport:                  LT + right.on_pressed
       # The two bipedal entries route through the stand-up policy first; that
       # policy auto-hands off to the walk policy after its configured duration
       # (see BipedalStandUp / BipedalStandUpGuarded below). The chained step is
       # internal — the user only sees a single press = bipedal walking.
-      BipedalStandUp:         LB + up.on_pressed
-      # LT modifier = GUARDED gaits (Surprise gate -> Stabilize on trip).
-      # LT + left and LT + right are reserved.
-      VelocityGuarded:        LT + down.on_pressed
-      BipedalStandUpGuarded:  LT + up.on_pressed
+      BipedalStandUp:         LT + up.on_pressed
+      # LB modifier = GUARDED gaits (Surprise gate -> Stabilize on trip).
+      # LB + left and LB + right are reserved.
+      VelocityGuarded:        LB + down.on_pressed
+      BipedalStandUpGuarded:  LB + up.on_pressed
       # Manual entry into the recovery policy. Bypasses the surprise auto-trip
       # so the stabilize policy can be tested in isolation from any pose.
       Stabilize:              start.on_pressed
@@ -182,6 +187,11 @@ FSM:
   # Pace gait quadruped walking (Unitree-Go2-Velocity-Rough-Pace training task).
   # 45-dim quadruped obs / 12-dim actions, drop-in compatible with the Velocity
   # state but with a different gait reward profile. Surprise is OFF.
+  #
+  # NOTE: currently INERT — ``enabled: false`` on the Pace entry in the FSM
+  # list above. The loader skips this state entirely (policy_dir / ONNX /
+  # deploy.yaml are not opened). Config preserved so the policy can be
+  # re-enabled with a one-line flip when it's validated.
   Pace:
     transitions:
       FixStand:  LT + A.on_pressed
@@ -243,13 +253,13 @@ FSM:
     transitions:
       Passive:                LT + B.on_pressed
       FixStand:               LT + A.on_pressed
-      # Same D-pad map as FixStand: LB = unguarded, LT = guarded.
-      Velocity:               LB + down.on_pressed
-      Pace:                   LB + left.on_pressed
-      Sport:                  LB + right.on_pressed
-      BipedalStandUp:         LB + up.on_pressed
-      VelocityGuarded:        LT + down.on_pressed
-      BipedalStandUpGuarded:  LT + up.on_pressed
+      # Same D-pad map as FixStand: LT = unguarded, LB = guarded.
+      # LT + left = Pace — currently unbound (policy disabled in FSM list).
+      Velocity:               LT + down.on_pressed
+      Sport:                  LT + right.on_pressed
+      BipedalStandUp:         LT + up.on_pressed
+      VelocityGuarded:        LB + down.on_pressed
+      BipedalStandUpGuarded:  LB + up.on_pressed
     policy_dir: ../../../logs/rsl_rl/unitree_go2_stabilize/0_best
     # Stabilize can be entered from any walking state (quad or bipedal), so the
     # deploy-side fall cut-off must be wider than the widest source state. The

@@ -19,6 +19,9 @@ cd "$UNITREE_RL_LAB_ROOT"
 
 POLICIES=(
     "Unitree-Go2-Velocity-Rough|unitree_go2_velocity_rough|0_best|best.pt"
+    "Unitree-Go2-Velocity-Rough-Pace|unitree_go2_velocity_rough_pace|0_best|best.pt"
+    "Unitree-Go2-Velocity-Rough-Sport|unitree_go2_velocity_rough_sport|0_best|best.pt"
+    "Unitree-Go2-Velocity-Rough-Gallop|unitree_go2_velocity_rough_gallop|0_best|best.pt"
     "Unitree-Go2-Stabilize|unitree_go2_stabilize|0_best|best.pt"
     "Unitree-Go2-Bipedal-Walk-Rough|unitree_go2_bipedal_walk_rough|0_best|best.pt"
     "Unitree-Go2-Bipedal-Standup|unitree_go2_bipedal_standup|0_best|best.pt"
@@ -99,6 +102,31 @@ for entry in "${POLICIES[@]}"; do
     export_policy "$i" "$task" "$experiment" "$run" "$checkpoint"
     i=$((i + 1))
 done
+
+echo "=================================="
+echo "Post-step: freeze batch dim to 1"
+echo "=================================="
+# Deploy-side ORT wrapper allocates input tensors from the model's declared
+# input shape. Any dynamic axis (e.g. 'batch') comes back as -1 and crashes
+# CreateTensor. The standalone exporter above already produces static-batch
+# ONNX, but if a policy was exported through Isaac Lab's play.py --export_policy
+# (or pulled in from upstream), the resulting file may carry dynamic axes.
+# This pass normalizes every ONNX under logs/rsl_rl/ to static batch=1.
+"$PYTHON_EXE" "$UNITREE_RL_LAB_ROOT/scripts/freeze_onnx_batch.py" \
+    "$UNITREE_RL_LAB_ROOT/logs/rsl_rl" || echo "  WARN: freeze_onnx_batch.py reported issues"
+echo ""
+
+echo "=================================="
+echo "Post-step: sanitize deploy.yaml"
+echo "=================================="
+# Some Isaac Lab export paths emit ``joint_ids: None`` (Python repr) instead
+# of the YAML null literal. yaml-cpp can't coerce that into vector<int>, so
+# JointPositionAction throws TypedBadConversion at state-init time. Rewrite
+# any such instance to lowercase ``null`` before the deploy controller sees
+# the file.
+"$PYTHON_EXE" "$UNITREE_RL_LAB_ROOT/scripts/sanitize_deploy_yaml.py" \
+    "$UNITREE_RL_LAB_ROOT/logs/rsl_rl" || echo "  WARN: sanitize_deploy_yaml.py reported issues"
+echo ""
 
 echo "=================================="
 echo "Summary"

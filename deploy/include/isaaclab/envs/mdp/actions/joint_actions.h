@@ -19,11 +19,24 @@ public:
     JointAction(YAML::Node cfg, ManagerBasedRLEnv* env)
     :ActionTerm(cfg, env)
     {
-        if(cfg["joint_ids"].IsNull()) {
+        // Some Isaac Lab export paths serialize Python ``None`` as the string
+        // literal ``None`` instead of the YAML null literal ``null``. yaml-cpp
+        // parses that as a non-null scalar string, so ``IsNull()`` returns
+        // false but ``.as<vector<int>>()`` then throws ``TypedBadConversion``.
+        // Fall back to "all joints" whenever the cast fails, mirroring the
+        // lenient pattern used by joint observation terms.
+        bool use_all_joints = cfg["joint_ids"].IsNull();
+        if(!use_all_joints) {
+            try {
+                _joint_ids = cfg["joint_ids"].as<std::vector<int>>();
+                _action_dim = _joint_ids.size();
+            } catch(const YAML::TypedBadConversion<std::vector<int>>&) {
+                use_all_joints = true;
+            }
+        }
+        if(use_all_joints) {
+            _joint_ids.clear();
             _action_dim = env->robot->data.joint_ids_map.size();
-        } else {
-            _joint_ids = cfg["joint_ids"].as<std::vector<int>>();
-            _action_dim = _joint_ids.size();
         }
         _raw_actions.resize(_action_dim, 0.0f);
         _processed_actions.resize(_action_dim, 0.0f);
