@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <iomanip>
@@ -762,16 +763,41 @@ bool State_RLBase::setup_surprise_model(const std::filesystem::path& model_path)
         }
         for (auto& s : surprise_input_name_storage) surprise_input_names.push_back(s.c_str());
 
-        if (surprise_input_names.size() != 2)
+        surprise_concat_obs_action_input = false;
+        if (surprise_input_names.size() == 2)
         {
-            spdlog::error("Surprise ONNX must have exactly 2 inputs (obs, action).");
+            surprise_obs_shape = surprise_session->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+            surprise_action_shape = surprise_session->GetInputTypeInfo(1).GetTensorTypeAndShapeInfo().GetShape();
+            for (auto& d : surprise_obs_shape) if (d <= 0) d = 1;
+            for (auto& d : surprise_action_shape) if (d <= 0) d = 1;
+        }
+        else if (surprise_input_names.size() == 1)
+        {
+            surprise_concat_obs_action_input = true;
+            surprise_obs_shape = surprise_session->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+            surprise_action_shape.clear();
+            for (auto& d : surprise_obs_shape) if (d <= 0) d = 1;
+            const int64_t expected = static_cast<int64_t>(obs_mean.size() + action_mean.size());
+            int64_t last = 1;
+            if (!surprise_obs_shape.empty()) last = surprise_obs_shape.back();
+            if (last != expected)
+            {
+                spdlog::error(
+                    "Surprise ONNX single-input last dim {} != obs_dim + action_dim ({} + {} = {}).",
+                    last,
+                    obs_mean.size(),
+                    action_mean.size(),
+                    expected
+                );
+                return false;
+            }
+            spdlog::info("Surprise ONNX: using single concatenated input (obs, then action), dim {}.", expected);
+        }
+        else
+        {
+            spdlog::error("Surprise ONNX must have 1 input (concat obs+action) or 2 inputs (obs, action).");
             return false;
         }
-
-        surprise_obs_shape = surprise_session->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
-        surprise_action_shape = surprise_session->GetInputTypeInfo(1).GetTensorTypeAndShapeInfo().GetShape();
-        for (auto& d : surprise_obs_shape) if (d <= 0) d = 1;
-        for (auto& d : surprise_action_shape) if (d <= 0) d = 1;
 
         surprise_output_name_storage.clear();
         surprise_output_names.clear();
@@ -849,15 +875,41 @@ void State_RLBase::update_surprise_gate(const std::vector<float>& obs, const std
     try
     {
         auto memory_info = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
-        auto obs_tensor = Ort::Value::CreateTensor<float>(
-            memory_info, obs_norm.data(), obs_norm.size(), surprise_obs_shape.data(), surprise_obs_shape.size()
-        );
-        auto action_tensor = Ort::Value::CreateTensor<float>(
-            memory_info, action_norm.data(), action_norm.size(), surprise_action_shape.data(), surprise_action_shape.size()
-        );
         std::vector<Ort::Value> inputs;
-        inputs.push_back(std::move(obs_tensor));
-        inputs.push_back(std::move(action_tensor));
+        if (surprise_concat_obs_action_input)
+        {
+            surprise_concat_buffer_.resize(obs_norm.size() + action_norm.size());
+            std::memcpy(
+                surprise_concat_buffer_.data(),
+                obs_norm.data(),
+                obs_norm.size() * sizeof(float)
+            );
+            std::memcpy(
+                surprise_concat_buffer_.data() + obs_norm.size(),
+                action_norm.data(),
+                action_norm.size() * sizeof(float)
+            );
+            inputs.push_back(Ort::Value::CreateTensor<float>(
+                memory_info,
+                surprise_concat_buffer_.data(),
+                surprise_concat_buffer_.size(),
+                surprise_obs_shape.data(),
+                surprise_obs_shape.size()
+            ));
+        }
+        else
+        {
+            inputs.push_back(Ort::Value::CreateTensor<float>(
+                memory_info, obs_norm.data(), obs_norm.size(), surprise_obs_shape.data(), surprise_obs_shape.size()
+            ));
+            inputs.push_back(Ort::Value::CreateTensor<float>(
+                memory_info,
+                action_norm.data(),
+                action_norm.size(),
+                surprise_action_shape.data(),
+                surprise_action_shape.size()
+            ));
+        }
 
         auto outputs = surprise_session->Run(
             Ort::RunOptions{nullptr},

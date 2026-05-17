@@ -127,6 +127,9 @@ private:
     std::vector<int64_t> surprise_output_shape;
     std::vector<int64_t> surprise_output_shape_alt;
     bool surprise_outputs_single_tensor = false;
+    /// When true, ONNX has one input tensor ``[batch, obs_dim + action_dim]`` (obs then action).
+    bool surprise_concat_obs_action_input = false;
+    std::vector<float> surprise_concat_buffer_;
 };
 
 REGISTER_FSM(State_RLBase)

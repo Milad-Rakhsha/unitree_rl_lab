@@ -42,7 +42,17 @@ public:
 
         for (size_t i = 0; i < session->GetInputCount(); ++i) {
             Ort::TypeInfo input_type = session->GetInputTypeInfo(i);
-            input_shapes.push_back(input_type.GetTensorTypeAndShapeInfo().GetShape());
+            auto shape = input_type.GetTensorTypeAndShapeInfo().GetShape();
+            // ONNX models exported with ``dynamic_axes`` (e.g. Isaac Lab's
+            // play.py --export_policy) report -1 for the dynamic dim. Deploy
+            // never batches, so clamp any non-positive dim to 1 here; this
+            // also propagates into ``CreateTensor`` below, which would
+            // otherwise throw "tried creating tensor with negative value in
+            // shape" the moment a dynamic-batch policy is invoked.
+            for (auto& dim : shape) {
+                if (dim <= 0) dim = 1;
+            }
+            input_shapes.push_back(std::move(shape));
             auto input_name = session->GetInputNameAllocated(i, allocator);
             input_names.push_back(input_name.release());
         }
@@ -55,9 +65,13 @@ public:
             input_sizes.push_back(size);
         }
 
-        // Get output shape
+        // Get output shape (apply the same clamp; the action buffer below is
+        // sized from output_shape[1] and must be a real positive count).
         Ort::TypeInfo output_type = session->GetOutputTypeInfo(0);
         output_shape = output_type.GetTensorTypeAndShapeInfo().GetShape();
+        for (auto& dim : output_shape) {
+            if (dim <= 0) dim = 1;
+        }
         auto output_name = session->GetOutputNameAllocated(0, allocator);
         output_names.push_back(output_name.release());
 
