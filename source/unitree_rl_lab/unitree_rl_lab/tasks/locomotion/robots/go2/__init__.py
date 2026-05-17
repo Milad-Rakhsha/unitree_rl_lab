@@ -87,6 +87,22 @@ gym.register(
     },
 )
 
+# -- Gallop / bound on gentle rough terrain ---
+#
+# Same gallop rewards as flat variant but with gentle random-uniform
+# bumps (5-30 mm) and terrain curriculum.  Resume from flat-gallop
+# checkpoint to preserve the bound gait.
+gym.register(
+    id="Unitree-Go2-Velocity-Rough-Gallop",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.gallop_env_cfg:RobotGallopRoughEnvCfg",
+        "play_env_cfg_entry_point": f"{__name__}.gallop_env_cfg:RobotGallopRoughPlayEnvCfg",
+        "rsl_rl_cfg_entry_point": f"unitree_rl_lab.tasks.locomotion.agents.rsl_rl_ppo_cfg:BasePPORunnerCfg",
+    },
+)
+
 # -- Stabilization / fall-recovery (scenario-based resets) ---
 #
 # Uses PresetCfg: run with ``presets=newton`` for Newton backend.
