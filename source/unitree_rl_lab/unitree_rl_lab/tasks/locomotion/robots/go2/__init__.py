@@ -38,17 +38,35 @@ gym.register(
     },
 )
 
-# -- Sport / agile velocity tracking on rough terrain ---
+# -- Sport / agile velocity tracking on flat terrain ---
 #
-# Higher command ranges (up to 2.0 m/s forward) and relaxed orientation
-# penalty so the robot can tilt during aggressive gaits.
+# Higher command ranges (up to ±1.5 m/s forward) and relaxed orientation
+# penalty so the robot can tilt during aggressive gaits.  Flat terrain
+# is deliberate — rough terrain forces conservative gaits that conflict
+# with the agility goal.
 gym.register(
-    id="Unitree-Go2-Velocity-Rough-Sport",
+    id="Unitree-Go2-Velocity-Flat-Sport",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.sport_env_cfg:RobotSportEnvCfg",
         "play_env_cfg_entry_point": f"{__name__}.sport_env_cfg:RobotSportPlayEnvCfg",
+        "rsl_rl_cfg_entry_point": f"unitree_rl_lab.tasks.locomotion.agents.rsl_rl_ppo_cfg:BasePPORunnerCfg",
+    },
+)
+
+# -- Sport on gentle rough terrain (robustness fine-tuning) ---
+#
+# Same sport rewards as the flat variant but with gentle random-uniform
+# bumps (5-30 mm) and terrain curriculum.  Resume from flat-sport
+# checkpoint to preserve the agile gait.
+gym.register(
+    id="Unitree-Go2-Velocity-Rough-Sport",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.sport_env_cfg:RobotSportRoughEnvCfg",
+        "play_env_cfg_entry_point": f"{__name__}.sport_env_cfg:RobotSportRoughPlayEnvCfg",
         "rsl_rl_cfg_entry_point": f"unitree_rl_lab.tasks.locomotion.agents.rsl_rl_ppo_cfg:BasePPORunnerCfg",
     },
 )
