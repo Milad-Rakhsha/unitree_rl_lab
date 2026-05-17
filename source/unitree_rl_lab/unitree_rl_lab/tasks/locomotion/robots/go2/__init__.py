@@ -71,6 +71,22 @@ gym.register(
     },
 )
 
+# -- Gallop / bound gait on flat terrain ---
+#
+# Asymmetric bounding gait: front pair and rear pair move in unison
+# with a flight phase between each pair's ground contact.  Commands
+# up to ±2.5 m/s forward.  Cheetah-like dynamic locomotion.
+gym.register(
+    id="Unitree-Go2-Velocity-Gallop",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.gallop_env_cfg:RobotGallopEnvCfg",
+        "play_env_cfg_entry_point": f"{__name__}.gallop_env_cfg:RobotGallopPlayEnvCfg",
+        "rsl_rl_cfg_entry_point": f"unitree_rl_lab.tasks.locomotion.agents.rsl_rl_ppo_cfg:BasePPORunnerCfg",
+    },
+)
+
 # -- Stabilization / fall-recovery (scenario-based resets) ---
 #
 # Uses PresetCfg: run with ``presets=newton`` for Newton backend.
