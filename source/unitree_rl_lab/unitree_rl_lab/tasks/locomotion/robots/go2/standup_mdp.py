@@ -534,3 +534,83 @@ def rear_calf_contact_penalty(
     any_contact = (force_mag > 1.0).any(dim=-1).float()
 
     return orient_scale * any_contact
+
+
+# ---------------------------------------------------------------------------
+# Penalty: early standup (encourage taking longer to reach upright)
+# ---------------------------------------------------------------------------
+
+def early_standup_penalty(
+    env: "ManagerBasedRLEnv",
+    desired_gravity: list[float],
+    min_cos_angle: float = 0.85,
+    min_steps: int = 100,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize reaching the upright pose too quickly.
+
+    Returns a penalty (positive value to be used with negative weight)
+    when the robot has cos_angle >= min_cos_angle AND the episode step
+    count is less than min_steps. The penalty decays linearly as the
+    step count approaches min_steps.
+
+    This discourages the policy from snapping upright immediately and
+    instead rewards a slow, controlled transition that takes at least
+    ``min_steps`` steps (~2s at 50 Hz).
+
+    Args:
+        desired_gravity: Target gravity direction in body frame.
+        min_cos_angle: Orientation threshold to consider "near upright".
+        min_steps: Minimum step count before upright is penalty-free.
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    target = torch.as_tensor(
+        desired_gravity, device=env.device, dtype=torch.float32
+    )
+
+    cos_angle = torch.sum(
+        _tt(asset.data.projected_gravity_b) * target, dim=-1
+    )
+    is_upright = (cos_angle >= min_cos_angle).float()
+
+    # Linear decay: penalty = 1.0 at step 0, 0.0 at step min_steps
+    step_frac = (env.episode_length_buf.float() / min_steps).clamp(0.0, 1.0)
+    time_penalty = 1.0 - step_frac
+
+    return is_upright * time_penalty
+
+
+# ---------------------------------------------------------------------------
+# Reward: progressive orientation (reward orientation more as time passes)
+# ---------------------------------------------------------------------------
+
+def orientation_align_time_scaled(
+    env: "ManagerBasedRLEnv",
+    desired_gravity: list[float],
+    ramp_steps: int = 75,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Orientation alignment scaled up over time.
+
+    Like orientation_align_raw but the reward starts low and ramps up
+    linearly over ``ramp_steps``. This means early steps get less
+    reward for being upright, discouraging racing to stand immediately.
+    At step >= ramp_steps, the reward is at full strength.
+
+    This creates a "no rush" incentive: the same upright pose is worth
+    more reward later in the episode than at the beginning.
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    target = torch.as_tensor(
+        desired_gravity, device=env.device, dtype=torch.float32
+    )
+
+    cos_angle = torch.sum(
+        _tt(asset.data.projected_gravity_b) * target, dim=-1
+    )
+    align = torch.clamp(cos_angle, min=0.0)
+
+    # Time ramp: 0.2 at step 0, linearly to 1.0 at ramp_steps
+    time_scale = (0.2 + 0.8 * (env.episode_length_buf.float() / ramp_steps)).clamp(0.2, 1.0)
+
+    return align * time_scale
