@@ -475,14 +475,11 @@ class RewardsCfg:
     # INTERACTIONS: Works in tandem with velocity_near_upright (w=-1.5),
     #        which penalizes speed near upright. Together they create
     #        "stand up, but slow down as you get there".
-    # v4: time-scaled orientation — starts at 20% for the first 75 steps
-    # (~1.5s), ramps to 100%. Removes incentive to snap upright instantly.
     orientation_align = RewTerm(
-        func=standup_mdp.orientation_align_time_scaled,
+        func=standup_mdp.orientation_align_raw,
         weight=3.0,
         params={
             "desired_gravity": DESIRED_GRAVITY_REAR,
-            "ramp_steps": 75,
         },
     )
 
@@ -1099,16 +1096,18 @@ class RewardsCfg:
         },
     )
 
-    # v4: Penalize reaching upright before ~2s. This is the ONLY
-    # additional penalty vs the original config. Everything else
-    # (smoothness, contacts, height) stays at original weights.
-    early_standup = RewTerm(
-        func=standup_mdp.early_standup_penalty,
-        weight=-5.0,
+    # v6: Hard velocity cap during standup. Fires a massive penalty
+    # when combined body velocity exceeds threshold while robot is
+    # still getting up (cos < 0.85). Once nearly upright, cap releases.
+    # This makes fast standup unprofitable — the -20.0 penalty per step
+    # outweighs the +8.0 success_bonus, forcing slow controlled motion.
+    excessive_velocity = RewTerm(
+        func=standup_mdp.excessive_velocity_penalty,
+        weight=-20.0,
         params={
             "desired_gravity": DESIRED_GRAVITY_REAR,
-            "min_cos_angle": 0.85,
-            "min_steps": 100,
+            "vel_threshold": 2.0,
+            "release_cos": 0.85,
         },
     )
 

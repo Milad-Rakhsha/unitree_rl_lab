@@ -614,3 +614,133 @@ def orientation_align_time_scaled(
     time_scale = (0.2 + 0.8 * (env.episode_length_buf.float() / ramp_steps)).clamp(0.2, 1.0)
 
     return align * time_scale
+
+
+# ---------------------------------------------------------------------------
+# Reward: late standup bonus (one-time, scales with episode progress)
+# ---------------------------------------------------------------------------
+
+def late_standup_bonus(
+    env: "ManagerBasedRLEnv",
+    desired_gravity: list[float],
+    min_cos_angle: float = 0.90,
+    min_base_height: float = 0.45,
+    max_ang_vel: float = 1.0,
+    ideal_step: int = 400,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """One-time bonus when robot first reaches standing, scaled by when.
+
+    The bonus fires exactly ONCE per episode — the first step all
+    standing criteria are met. The reward magnitude depends on the
+    episode step at which standing is achieved:
+
+        reward = clamp(step / ideal_step, 0, 1)
+
+    Standing at step 0 → ~0.0 reward (worthless).
+    Standing at step ideal_step → 1.0 reward (full bonus).
+
+    This makes the optimal strategy: take your time getting up,
+    stand near step ideal_step.
+
+    A per-env flag ``_late_standup_fired`` tracks whether the bonus
+    has already been given this episode.
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    target = torch.as_tensor(
+        desired_gravity, device=env.device, dtype=torch.float32
+    )
+
+    cos_angle = torch.sum(
+        _tt(asset.data.projected_gravity_b) * target, dim=-1
+    )
+    orient_ok = cos_angle >= min_cos_angle
+
+    height_ok = _tt(asset.data.root_pos_w)[:, 2] >= min_base_height
+
+    ang_vel_norm = torch.linalg.norm(
+        _tt(asset.data.root_ang_vel_w), dim=-1
+    )
+    calm_ok = ang_vel_norm < max_ang_vel
+
+    all_ok = orient_ok & height_ok & calm_ok
+
+    # Manage one-time flag
+    if not hasattr(env, "_late_standup_fired"):
+        env._late_standup_fired = torch.zeros(
+            env.num_envs, device=env.device, dtype=torch.bool
+        )
+
+    fired = env._late_standup_fired
+
+    # Reset flag for envs that just reset
+    just_reset = env.episode_length_buf == 0
+    fired[just_reset] = False
+
+    # Find envs that meet criteria for the first time
+    newly_standing = all_ok & (~fired)
+
+    # Mark them as fired
+    fired[newly_standing] = True
+
+    # Time-scaled reward: later is better
+    time_scale = (env.episode_length_buf.float() / ideal_step).clamp(0.0, 1.0)
+
+    # Only reward the newly standing envs
+    return newly_standing.float() * time_scale
+
+
+# ---------------------------------------------------------------------------
+# Penalty: excessive velocity during standup (hard cap)
+# ---------------------------------------------------------------------------
+
+def excessive_velocity_penalty(
+    env: "ManagerBasedRLEnv",
+    desired_gravity: list[float],
+    vel_threshold: float = 2.0,
+    release_cos: float = 0.85,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Hard penalty when body velocity exceeds threshold during standup.
+
+    Returns 1.0 (use with a large negative weight) when the combined
+    velocity magnitude exceeds ``vel_threshold`` AND the robot has not
+    yet reached ``release_cos`` orientation. Once the robot is nearly
+    upright (cos >= release_cos), the penalty turns off.
+
+    Combined velocity: ||lin_vel||^2 + ||ang_vel||^2
+
+    The intent is to make fast standup motions unprofitable. The penalty
+    should outweigh any per-step reward (e.g. success_bonus at +8.0),
+    forcing the policy to stay under the speed limit.
+
+    Args:
+        desired_gravity: Target gravity direction in body frame.
+        vel_threshold: Combined velocity threshold (squared norms).
+        release_cos: Once cos_angle >= this, penalty is released.
+        asset_cfg: Robot asset config.
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    target = torch.as_tensor(
+        desired_gravity, device=env.device, dtype=torch.float32
+    )
+
+    # Orientation check — penalty only active while still getting up
+    cos_angle = torch.sum(
+        _tt(asset.data.projected_gravity_b) * target, dim=-1
+    )
+    still_rising = (cos_angle < release_cos).float()
+
+    # Combined velocity magnitude
+    lin_vel_sq = torch.sum(
+        _tt(asset.data.root_lin_vel_w) ** 2, dim=-1
+    )
+    ang_vel_sq = torch.sum(
+        _tt(asset.data.root_ang_vel_w) ** 2, dim=-1
+    )
+    vel_combined = lin_vel_sq + ang_vel_sq
+
+    # Hard threshold — binary penalty
+    too_fast = (vel_combined > vel_threshold).float()
+
+    return still_rising * too_fast
