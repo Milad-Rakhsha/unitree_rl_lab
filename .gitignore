@@ -70,6 +70,7 @@ datasets
 *.mtl
 *.STL
 **/env.yaml
+deploy/thirdparty/onnxruntime-linux-aarch64-*/
 
 # Mimic
 *.npz
