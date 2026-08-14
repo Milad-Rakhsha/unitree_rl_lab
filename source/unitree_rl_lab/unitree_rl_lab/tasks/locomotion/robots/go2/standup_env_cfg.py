@@ -48,12 +48,13 @@ from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab_physx.physics import PhysxCfg
 from isaaclab_newton.physics import (
+    DVISolverCfg,
     NewtonCfg,
     MJWarpSolverCfg,
     NewtonCollisionPipelineCfg,
     NewtonShapeCfg,
 )
-from isaaclab_tasks.utils import PresetCfg
+from isaaclab_tasks.utils import PresetCfg, preset
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -62,6 +63,7 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
+from isaaclab_newton.sensors.contact_sensor.contact_sensor_cfg import ContactSensorCfg as NewtonContactSensorCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
@@ -151,6 +153,38 @@ class RobotSceneCfg(InteractiveSceneCfg):
     height_scanner = None
     contact_forces = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/.*",
+        history_length=3,
+        track_air_time=True,
+    )
+    # Match the bipedal walk DVI sensors.  Fixed-joint collapse moves foot
+    # geometry onto the calf bodies, so foot/calf contacts must be selected by
+    # collision shape rather than by rigid-body name.
+    contact_forces_rear_feet = NewtonContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/.*",
+        sensor_shape_prim_expr=[
+            "{ENV_REGEX_NS}/Robot/RL_foot/collisions/*",
+            "{ENV_REGEX_NS}/Robot/RR_foot/collisions/*",
+        ],
+        history_length=3,
+        track_air_time=True,
+    )
+    contact_forces_calf_shapes = NewtonContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/.*",
+        sensor_shape_prim_expr=[
+            "{ENV_REGEX_NS}/Robot/FL_calf/collisions/*",
+            "{ENV_REGEX_NS}/Robot/FR_calf/collisions/*",
+            "{ENV_REGEX_NS}/Robot/RL_calf/collisions/*",
+            "{ENV_REGEX_NS}/Robot/RR_calf/collisions/*",
+        ],
+        history_length=3,
+        track_air_time=True,
+    )
+    contact_forces_front_feet = NewtonContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/.*",
+        sensor_shape_prim_expr=[
+            "{ENV_REGEX_NS}/Robot/FL_foot/collisions/*",
+            "{ENV_REGEX_NS}/Robot/FR_foot/collisions/*",
+        ],
         history_length=3,
         track_air_time=True,
     )
@@ -1199,6 +1233,35 @@ class StandupRoughPhysicsCfg(PresetCfg):
         num_substeps=1,
         debug_mode=False,
     )
+    newton_dvi: NewtonCfg = NewtonCfg(
+        solver_cfg=DVISolverCfg(
+            joint_solver_type="sparse_ldl",
+            joint_alpha=0.0,
+            joint_recovery_speed=100000.0,
+            joint_iterative_refinement_steps=1,
+            joint_limit_solver_type="sparse_jacobi",
+            contact_solver_type="sparse_jacobi",
+            contact_max_iterations=20,
+            contact_omega=0.1,
+            contact_reg=1.0e-3,
+            contact_compliance=1.0e-5,
+            contact_alpha=0.0,
+            contact_recovery_speed=5.0,
+            coupling_iterations=2,
+            post_stabilize_joints=False,
+            angular_damping=0.0,
+            actuator_integration="explicit",
+        ),
+        num_substeps=2,
+        debug_mode=False,
+        use_cuda_graph=True,
+        collapse_fixed_joints=True,
+        default_shape_cfg=NewtonShapeCfg(gap=0.005),
+        collision_cfg=NewtonCollisionPipelineCfg(
+            rigid_contact_max=1665536,
+            max_triangle_pairs=2_500_000,
+        ),
+    )
     physx = default
 
 
@@ -1238,6 +1301,26 @@ class RobotStandupEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.render_interval = self.decimation
         self.sim.physics_material = self.scene.terrain.physics_material
         self.sim.physics = StandupFlatPhysicsCfg()
+        # Route stand-up contact rewards to the same shape-aware DVI sensors
+        # used by bipedal walking. Reward functions and weights are unchanged.
+        for term_name, sensor_name, default_names, dvi_names in (
+            ("rear_foot_contact", "contact_forces_rear_feet", "R[LR]_foot", "RL_foot/collisions/.*|RR_foot/collisions/.*"),
+            ("rear_calf_contact", "contact_forces_calf_shapes", "R[LR]_calf", "RL_calf/collisions/.*|RR_calf/collisions/.*"),
+            ("front_calf_contact", "contact_forces_calf_shapes", "F[LR]_calf", "FL_calf/collisions/.*|FR_calf/collisions/.*"),
+            ("front_foot_contact", "contact_forces_front_feet", "F[LR]_foot", "FL_foot/collisions/.*|FR_foot/collisions/.*"),
+        ):
+            sensor_cfg = getattr(self.rewards, term_name).params["sensor_cfg"]
+            sensor_cfg.name = preset(default="contact_forces", newton_mjwarp="contact_forces", newton_dvi=sensor_name)
+            sensor_cfg.body_names = preset(default=default_names, newton_mjwarp=default_names, newton_dvi=dvi_names)
+        # Head collision shapes are merged into the Newton base body after
+        # fixed-joint collapse, so the legacy Head_.* body selector is invalid
+        # under DVI.  Keep the reward for PhysX/MJWarp and disable only this
+        # unresolvable term for DVI, matching the bipedal walk configuration.
+        self.rewards.head_contact = preset(
+            default=self.rewards.head_contact,
+            newton_mjwarp=self.rewards.head_contact,
+            newton_dvi=None,
+        )
         self.scene.contact_forces.update_period = self.sim.dt
 
 
