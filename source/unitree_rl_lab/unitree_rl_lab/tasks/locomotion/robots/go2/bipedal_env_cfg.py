@@ -164,6 +164,7 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
+from isaaclab_newton.sensors.contact_sensor.contact_sensor_cfg import ContactSensorCfg as NewtonContactSensorCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
@@ -248,8 +249,42 @@ class RobotSceneCfg(InteractiveSceneCfg):
     robot: ArticulationCfg = ROBOT_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
     height_scanner = None
+    # Keep the legacy body-level sensor for links that remain distinct after
+    # Newton fixed-joint collapse (base, hips, thighs, head).  Feet and calves
+    # use dedicated shape-level sensors below: Newton moves the foot collision
+    # shapes onto the calf rigid body, but preserves their individual shape
+    # labels and contact rows.
     contact_forces = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/.*",
+        history_length=3,
+        track_air_time=True,
+    )
+    contact_forces_rear_feet = NewtonContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/.*",
+        sensor_shape_prim_expr=[
+            "{ENV_REGEX_NS}/Robot/RL_foot/collisions/*",
+            "{ENV_REGEX_NS}/Robot/RR_foot/collisions/*",
+        ],
+        history_length=3,
+        track_air_time=True,
+    )
+    contact_forces_calf_shapes = NewtonContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/.*",
+        sensor_shape_prim_expr=[
+            "{ENV_REGEX_NS}/Robot/FL_calf/collisions/*",
+            "{ENV_REGEX_NS}/Robot/FR_calf/collisions/*",
+            "{ENV_REGEX_NS}/Robot/RL_calf/collisions/*",
+            "{ENV_REGEX_NS}/Robot/RR_calf/collisions/*",
+        ],
+        history_length=3,
+        track_air_time=True,
+    )
+    contact_forces_front_feet = NewtonContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/.*",
+        sensor_shape_prim_expr=[
+            "{ENV_REGEX_NS}/Robot/FL_foot/collisions/*",
+            "{ENV_REGEX_NS}/Robot/FR_foot/collisions/*",
+        ],
         history_length=3,
         track_air_time=True,
     )
@@ -1514,22 +1549,26 @@ class BipedalFlatPhysicsCfg(PresetCfg):
     newton_dvi: NewtonCfg = NewtonCfg(
         solver_cfg=DVISolverCfg(
             joint_solver_type="sparse_ldl",
-            joint_alpha=0.005,
+            joint_alpha=0.0,
             joint_recovery_speed=100000.0,
             joint_position_correction=False,
             joint_iterative_refinement_steps=1,
             joint_limit_solver_type="sparse_jacobi",
-            joint_limit_max_iterations=10,
             joint_limit_ke_scale=0.1,
             contact_solver_type="sparse_jacobi",
-            contact_max_iterations=10,
+            contact_max_iterations=20,
+            contact_omega=0.15,
+            contact_reg=1.0e-3,
+            contact_compliance=1.0e-7,
             contact_alpha=0.0,
-            contact_recovery_speed=1.0,
+            contact_recovery_speed=5.0,
             contact_position_correction=False,
+            coupling_iterations=2,
+            post_stabilize_joints=False,
             angular_damping=0.0,
-            actuator_integration="semi_implicit",
+            actuator_integration="explicit",
         ),
-        num_substeps=1,
+        num_substeps=2,
         debug_mode=False,
         use_cuda_graph=True,
         collapse_fixed_joints=True,
@@ -1567,6 +1606,40 @@ class BipedalRoughPhysicsCfg(PresetCfg):
         default_shape_cfg=NewtonShapeCfg(margin=0.01),
         num_substeps=1,
         debug_mode=False,
+    )
+    newton_dvi: NewtonCfg = NewtonCfg(
+        solver_cfg=DVISolverCfg(
+            joint_solver_type="sparse_ldl",
+            joint_alpha=0.0,
+            joint_recovery_speed=100000.0,
+            joint_position_correction=False,
+            joint_iterative_refinement_steps=1,
+            joint_limit_solver_type="sparse_jacobi",
+            joint_limit_ke_scale=0.1,
+            contact_solver_type="sparse_jacobi",
+            contact_max_iterations=20,
+            contact_omega=0.15,
+            contact_reg=1.0e-3,
+            contact_compliance=1.0e-7,
+            contact_alpha=0.0,
+            contact_recovery_speed=5.0,
+            contact_position_correction=False,
+            coupling_iterations=2,
+            post_stabilize_joints=False,
+            angular_damping=0.0,
+            actuator_integration="explicit",
+        ),
+        num_substeps=2,
+        debug_mode=False,
+        use_cuda_graph=True,
+        collapse_fixed_joints=True,
+        # Match the validated four-legged velocity-rough DVI contact shape settings.
+        # Leave margin at its Newton default (0.0) and use an explicit 5 mm gap.
+        default_shape_cfg=NewtonShapeCfg(gap=0.005),
+        collision_cfg=NewtonCollisionPipelineCfg(
+            rigid_contact_max=665536,
+            max_triangle_pairs=2_500_000,
+        ),
     )
     physx = default
 
@@ -1608,30 +1681,55 @@ class RobotBipedalWalkEnvCfg(ManagerBasedRLEnvCfg):
         # ``self.sim.physx.<attr>`` (that API no longer exists).
         self.sim.physics_material = self.scene.terrain.physics_material
         self.sim.physics = BipedalFlatPhysicsCfg()
-        # The custom Unitree actuator emits explicit torques. DVI instead uses
-        # solver-integrated PD gains, matching the validated Isaac Lab Go2 DVI
-        # setup while preserving the MJWarp/PhysX actuator unchanged.
-        self.scene.robot.actuators["GO2HV"] = preset(
-            default=self.scene.robot.actuators["GO2HV"],
-            newton_mjwarp=self.scene.robot.actuators["GO2HV"],
-            newton_dvi=ImplicitActuatorCfg(
-                joint_names_expr=[".*"],
-                effort_limit_sim=23.5,
-                velocity_limit_sim=30.0,
-                stiffness=25.0,
-                damping=0.5,
-                friction=0.01,
-            ),
-        )
-        # Newton collapses each fixed foot into its calf. Use solver-specific
-        # contact-sensor names while retaining foot bodies for kinematic terms.
-        for reward_name in ("rear_feet_air_time", "rear_feet_flight", "rear_feet_slide"):
-            reward = getattr(self.rewards, reward_name)
-            reward.params["sensor_cfg"].body_names = preset(
-                default="R[LR]_foot",
-                newton_mjwarp="R[LR]_calf",
-                newton_dvi="R[LR]_calf",
+        # Use the same Unitree GO2HV actuator model for every backend,
+        # including DVI.  Do not replace it with an IsaacLab implicit-PD
+        # actuator: the Unitree actuator supplies the tuned torque-speed,
+        # friction, stiffness, damping, and effort-limit behavior.
+        # Select shape-level Newton sensors only for DVI. The reward
+        # mathematics and weights remain unchanged; only sensor rows change
+        # because fixed-joint collapse puts foot shapes on calf bodies.
+        rear_sensor_cfgs = [
+            getattr(self.rewards, name).params["sensor_cfg"]
+            for name in ("rear_feet_air_time", "rear_feet_flight", "rear_feet_slide")
+        ]
+        for sensor_cfg in rear_sensor_cfgs:
+            sensor_cfg.name = preset(
+                default="contact_forces",
+                newton_mjwarp="contact_forces",
+                newton_dvi="contact_forces_rear_feet",
             )
+            sensor_cfg.body_names = preset(
+                default="R[LR]_foot",
+                newton_mjwarp="R[LR]_foot",
+                newton_dvi="RL_foot/collisions/.*|RR_foot/collisions/.*",
+            )
+
+        for term_name, sensor_name, default_names, dvi_names in (
+            (
+                "calf_contact",
+                "contact_forces_calf_shapes",
+                ".*_calf",
+                "FL_calf/collisions/.*|FR_calf/collisions/.*|RL_calf/collisions/.*|RR_calf/collisions/.*",
+            ),
+            (
+                "front_foot_contact",
+                "contact_forces_front_feet",
+                "F[LR]_foot",
+                "FL_foot/collisions/.*|FR_foot/collisions/.*",
+            ),
+        ):
+            sensor_cfg = getattr(self.rewards, term_name).params["sensor_cfg"]
+            sensor_cfg.name = preset(
+                default="contact_forces",
+                newton_mjwarp="contact_forces",
+                newton_dvi=sensor_name,
+            )
+            sensor_cfg.body_names = preset(
+                default=default_names,
+                newton_mjwarp=default_names,
+                newton_dvi=dvi_names,
+            )
+
         for reward_name in ("rear_feet_clearance", "rear_feet_slide"):
             reward = getattr(self.rewards, reward_name)
             reward.params["asset_cfg"].body_names = preset(
@@ -1639,20 +1737,10 @@ class RobotBipedalWalkEnvCfg(ManagerBasedRLEnvCfg):
                 newton_mjwarp="R[LR]_calf",
                 newton_dvi="R[LR]_calf",
             )
-        self.rewards.front_foot_contact.params["sensor_cfg"].body_names = preset(
-            default="F[LR]_foot",
-            newton_mjwarp="F[LR]_calf",
-            newton_dvi="F[LR]_calf",
-        )
-        # Collapsing fixed joints makes foot contact indistinguishable from
-        # calf contact and head contact indistinguishable from base contact.
-        # Disable those two penalties for Newton rather than penalizing valid
-        # support contacts; base contact remains a termination condition.
-        self.rewards.calf_contact = preset(
-            default=self.rewards.calf_contact,
-            newton_mjwarp=None,
-            newton_dvi=None,
-        )
+        # Calf contact remains active under DVI: its shape-level sensor
+        # excludes the separately sensed foot collision meshes.  Head contact
+        # remains disabled for DVI because head geometry is collapsed into the
+        # base body and has not yet been split into a dedicated shape sensor.
         self.rewards.head_contact = preset(
             default=self.rewards.head_contact,
             newton_mjwarp=None,

@@ -17,11 +17,13 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--checkpoint", type=pathlib.Path, required=True)
+parser.add_argument("--task", type=str, default="Unitree-Go2-Bipedal-Walk")
 parser.add_argument("--output", type=pathlib.Path, required=True)
 parser.add_argument("--steps", type=int, default=400)
 parser.add_argument("--fps", type=int, default=50)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--num-envs", type=int, default=1, help="Number of simultaneous environments to render.")
+parser.add_argument("--focus-left", action="store_true", help="Zoom and focus on the left side of a multi-environment grid.")
 parser.add_argument("--preset", choices=("newton_dvi", "newton_mjwarp"), default="newton_dvi")
 parser.add_argument("--joint-limit-iterations", type=int)
 parser.add_argument("--coupling-iterations", type=int)
@@ -59,7 +61,7 @@ from isaaclab_visualizers.newton import NewtonVisualizerCfg
 
 
 def main() -> None:
-    task = "Unitree-Go2-Bipedal-Walk"
+    task = args.task
     cfg = load_cfg_from_registry(task, "play_env_cfg_entry_point")
     cfg = resolve_presets(cfg, {args.preset})
     if args.joint_limit_iterations is not None:
@@ -90,17 +92,21 @@ def main() -> None:
     if args.num_envs == 1:
         eye, lookat = (3.0, -3.0, 1.7), (0.0, 0.0, 0.55)
     else:
-        # Isaac Lab packs replicated environments on a near-square grid.  Use
-        # the occupied grid extent (N-1 spacings), not the overly conservative
-        # row/column capacity, so multi-env videos remain legible.
+        # Isaac Lab packs replicated environments on a near-square grid.  The
+        # default is a wide grid shot; --focus-left deliberately zooms into
+        # the leftmost two columns for inspectable gait behavior.
         cols = int(np.ceil(np.sqrt(args.num_envs)))
         rows = int(np.ceil(args.num_envs / cols))
         extent_x = 2.5 * (cols - 1)
         extent_y = 2.5 * (rows - 1)
-        span = max(extent_x, extent_y)
-        center_x, center_y = 0.5 * extent_x, 0.5 * extent_y
-        eye = (center_x + 0.90 * span, -0.90 * span, 0.78 * span)
-        lookat = (center_x, center_y, 0.45)
+        if args.focus_left:
+            eye = (2.5, -7.0, 5.5)
+            lookat = (0.0, 2.5 * min(rows - 1, 3) / 2.0, 0.45)
+        else:
+            span = max(extent_x, extent_y)
+            center_x, center_y = 0.5 * extent_x, 0.5 * extent_y
+            eye = (center_x + 0.90 * span, -0.90 * span, 0.78 * span)
+            lookat = (center_x, center_y, 0.45)
     cfg.sim.visualizer_cfgs = [
         NewtonVisualizerCfg(
             headless=True,

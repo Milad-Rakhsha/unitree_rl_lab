@@ -83,6 +83,19 @@ def qri(q, v):
     return v - w * t + np.cross(u, t)
 
 def load_policy(path, device="cpu"):
+    if str(path).lower().endswith(".onnx"):
+        import onnxruntime as ort
+        session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+        input_name = session.get_inputs()[0].name
+        input_shape = session.get_inputs()[0].shape
+        class OnnxPolicy:
+            obs_dim = int(input_shape[1])
+            def __call__(self, obs):
+                array = obs.detach().cpu().numpy().astype(np.float32, copy=False)
+                return torch.from_numpy(session.run(None, {input_name: array})[0])
+            def parameters(self):
+                return iter(())
+        return OnnxPolicy(), True
     try:
         p = torch.jit.load(path, map_location=device); p.eval(); return p, True
     except Exception:

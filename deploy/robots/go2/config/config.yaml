@@ -1,15 +1,16 @@
 # =============================================================================
-# Go2 deployment FSM: fixed stance + rough-terrain velocity only
+# Go2 deployment FSM: fixed stance + rough-terrain quadruped and bipedal policies
 # =============================================================================
 #
 # Controls
-#   LT + A    Passive / Velocity -> FixStand
-#   LT + B    FixStand -> Passive
-#   LT + Down FixStand -> Velocity (rough-terrain quadruped policy)
+#   LT + A     Passive / policy states -> FixStand
+#   LT + B     FixStand -> Passive
+#   LT + Down  FixStand -> Velocity (rough-terrain quadruped policy)
+#   LT + Up    FixStand -> BipedalVelocity (rough-terrain bipedal policy)
 #
-# To remove torque from Velocity, press LT+A to return to FixStand, then LT+B.
+# To remove torque from either policy, press LT+A to return to FixStand, then LT+B.
 #
-# The deployed Velocity policy must provide matching artifacts:
+# Each deployed policy directory must provide matching artifacts:
 #   params/deploy.yaml
 #   exported/policy.onnx
 
@@ -21,6 +22,9 @@ FSM:
       id: 2
     Velocity:
       id: 3
+      type: RLBase
+    BipedalVelocity:
+      id: 4
       type: RLBase
 
   # Torque-disabled safety state. This is infrastructure, not a policy.
@@ -35,6 +39,7 @@ FSM:
     transitions:
       Passive:  LT + B.on_pressed
       Velocity: LT + down.on_pressed
+      BipedalVelocity: LT + up.on_pressed
     auto_velocity:
       enabled: false
     kp: [60, 80, 80, 60, 80, 80, 60, 80, 80, 60, 80, 80]
@@ -46,11 +51,20 @@ FSM:
       [-0.1, 0.8, -1.5, 0.1, 0.8, -1.5, -0.1, 1.0, -1.5, 0.1, 1.0, -1.5],
     ]
 
-  # Completed contact-stabilized DVI rough policy deployment slot.
+  # Rough-terrain quadrupedal velocity policy.
   Velocity:
     transitions:
       FixStand: LT + A.on_pressed
     policy_dir: ../../../logs/rsl_rl/unitree_go2_velocity_rough/0_best
+    bad_orientation_limit: 1.2
+    surprise:
+      enabled: false
+
+  # Rough-terrain bipedal velocity policy.
+  BipedalVelocity:
+    transitions:
+      FixStand: LT + A.on_pressed
+    policy_dir: ../../../logs/rsl_rl/unitree_go2_bipedal_walk_rough/0_best
     bad_orientation_limit: 1.2
     surprise:
       enabled: false
