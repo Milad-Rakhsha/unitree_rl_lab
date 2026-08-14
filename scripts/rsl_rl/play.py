@@ -33,6 +33,12 @@ parser.add_argument(
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 parser.add_argument("--newton_visualizer", action="store_true", default=False, help="Enable Newton rendering.")
+parser.add_argument(
+    "--preset",
+    type=str,
+    default=None,
+    help="Optional physics preset to apply before playback (for example: newton_dvi).",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -73,6 +79,7 @@ from isaaclab_rl.rsl_rl import (
     handle_deprecated_rsl_rl_cfg,
 )
 from isaaclab_tasks.utils import get_checkpoint_path
+from isaaclab_tasks.utils.hydra import resolve_presets
 
 import unitree_rl_lab.tasks  # noqa: F401
 from unitree_rl_lab.utils.parser_cfg import parse_env_cfg
@@ -88,6 +95,9 @@ def main():
         use_fabric=not args_cli.disable_fabric,
         entry_point_key="play_env_cfg_entry_point",
     )
+    if args_cli.preset is not None:
+        resolve_presets(env_cfg, selected={args_cli.preset})
+        print(f"[INFO]: Applied playback preset: {args_cli.preset}")
     env_cfg.sim.enable_newton_rendering = args_cli.newton_visualizer
     agent_cfg: RslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
 

@@ -11,18 +11,33 @@ import torch
 from torch import nn
 
 
-def export_policy(checkpoint_path, output_path, obs_dim=135, act_dim=12, hidden_sizes=[512, 256, 128]):
-    """Export actor from rsl_rl checkpoint to JIT torchscript."""
+def export_policy(checkpoint_path, output_path, obs_dim=None, act_dim=12, hidden_sizes=[512, 256, 128]):
+    """Export actor from rsl_rl checkpoint to JIT torchscript.
+
+    Infer the actor observation dimension from its first MLP layer unless an
+    explicit value is supplied. This supports both current single-frame (45-D)
+    and historical four-frame (135-D) Go2 policies.
+    """
     # Load checkpoint
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    
+
     if "actor_state_dict" in ckpt:
         sd = ckpt["actor_state_dict"]
     elif "model_state_dict" in ckpt:
         sd = ckpt["model_state_dict"]
     else:
         raise ValueError(f"Unknown checkpoint format. Keys: {list(ckpt.keys())}")
-    
+
+    first_weight = sd.get("mlp.0.weight")
+    if first_weight is None:
+        raise ValueError("Actor state dict has no mlp.0.weight; cannot infer observation dimension.")
+    inferred_obs_dim = first_weight.shape[1]
+    if obs_dim is None:
+        obs_dim = inferred_obs_dim
+    elif obs_dim != inferred_obs_dim:
+        raise ValueError(f"Requested obs_dim={obs_dim}, but checkpoint actor expects {inferred_obs_dim}.")
+    print(f"Actor dimensions: obs={obs_dim}, act={act_dim}")
+
     # Build actor network
     layers = []
     in_dim = obs_dim
@@ -70,7 +85,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True, help="Path to model checkpoint")
     parser.add_argument("--output", default=None, help="Output path (default: same dir as checkpoint)")
-    parser.add_argument("--obs-dim", type=int, default=135)
+    parser.add_argument("--obs-dim", type=int, default=None, help="Actor observation dimension (default: infer from checkpoint)")
     parser.add_argument("--act-dim", type=int, default=12)
     args = parser.parse_args()
     

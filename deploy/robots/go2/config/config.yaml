@@ -1,81 +1,20 @@
 # =============================================================================
-# Go2 deployment FSM config
+# Go2 deployment FSM: fixed stance + rough-terrain velocity only
 # =============================================================================
 #
-# Joystick shortcuts (from FixStand / Stabilize) — D-pad layout:
+# Controls
+#   LT + A    Passive / Velocity -> FixStand
+#   LT + B    FixStand -> Passive
+#   LT + Down FixStand -> Velocity (rough-terrain quadruped policy)
 #
-# LT modifier = UNGUARDED gaits (no Surprise gate). LB modifier = GUARDED.
+# To remove torque from Velocity, press LT+A to return to FixStand, then LT+B.
 #
-#                       LT + up                        LB + up
-#                   BipedalStandUp                 BipedalStandUpGuarded
-#                        ...                            ...
-#                   BipedalRear                    BipedalRearGuarded
-#                  (bipedal walk)              (bipedal walk + Surprise)
-#                        ^                              ^
-#                        |                              |
-#       LT + left <----- + ----> LT + right             |
-#     (unassigned)               Sport                  |
-#                          (rough_sport gait)           |
-#       Pace: disabled in FSM list                      |
-#                        |
-#                        v                              v
-#                     LT + down                      LB + down
-#                     Velocity                    VelocityGuarded
-#                  (rough quad trot)         (rough quad trot + Surprise)
-#
-#   LB + left, LB + right                          (reserved, unassigned)
-#
-# Bipedal entry chain (internal, invisible to the operator):
-#
-#   FixStand --(LT+up)--> BipedalStandUp         --(auto, 2 s)--> BipedalRear
-#   FixStand --(LB+up)--> BipedalStandUpGuarded  --(auto, 2 s)--> BipedalRearGuarded
-#
-#   The hand-off delay is the ``auto_transition.duration_s`` field of each
-#   BipedalStandUp* state — tune that, not the walking policy, if the robot
-#   isn't fully upright before the walking phase kicks in.
-#
-# Direct stabilize shortcut:
-#   START   (from FixStand or any walking / standup state) -> Stabilize
-#           Manual entry into the recovery policy.
-#
-# Return shortcuts:
-#
-#   LT + A  (from any walking / standup / stabilize state) -> FixStand
-#   LT + B  (from FixStand or Stabilize)                   -> Passive
-#
-# To kill torque while a walking policy is active, press LT+A first to land
-# in FixStand (or START to enter Stabilize), then LT+B.
-#
-# Surprise-guarded walking trip:
-#
-#   VelocityGuarded     --(surprise trip)--> Stabilize
-#   BipedalRearGuarded  --(surprise trip)--> Stabilize
-#
-# Stabilize does NOT auto-return. Once the robot is stable, the operator
-# picks the next state explicitly using the same D-pad layout as FixStand.
-#
-# Plain (LT-prefixed) walking policies have surprise disabled, so the only
-# exits are joystick (LT+A / LT+B / START) or a fall termination.
-#
-# Each RL policy_dir must contain the artifacts from that training run:
-#   params/deploy.yaml   (from export_deploy_cfg / play export)
+# The deployed Velocity policy must provide matching artifacts:
+#   params/deploy.yaml
 #   exported/policy.onnx
-# If deploy.yaml or ONNX came from a different task or checkpoint, the robot
-# will usually collapse immediately. Re-export params/deploy.yaml after
-# Isaac Lab upgrades so joint_ids_map / observations match the current
-# training task.
-#
-# bad_orientation_limit (rad) is the deploy-side fall cut-off. For quadruped
-# policies this should match the training termination (e.g. rough_env_cfg
-# uses 1.2 rad); the C++ default (1.0) is stricter and can trip before the
-# policy recovers.
-#
-# Joystick axes feed ``velocity_commands`` in deploy; a drifting stick reads
-# as a non-zero command. Center the sticks (or add deadband in code) for a
-# clean stand.
 
 FSM:
-  _: # enabled FSMs (name -> id + C++ type)
+  _:
     Passive:
       id: 1
     FixStand:
@@ -83,79 +22,19 @@ FSM:
     Velocity:
       id: 3
       type: RLBase
-    VelocityGuarded:
-      id: 4
-      type: RLBase
-    Stabilize:
-      id: 5
-      type: RLBase
-    BipedalRear:
-      id: 6
-      type: RLBase
-    BipedalRearGuarded:
-      id: 7
-      type: RLBase
-    BipedalStandUp:
-      id: 8
-      type: RLBase
-    BipedalStandUpGuarded:
-      id: 9
-      type: RLBase
-    # Pace is currently disabled — policy not yet validated for deployment.
-    # To re-enable: flip ``enabled: true`` and restore the ``LB + left``
-    # bindings in FixStand / Stabilize transitions below.
-    Pace:
-      id: 10
-      type: RLBase
-      enabled: false
-    Sport:
-      id: 11
-      type: RLBase
 
-  # ---------------------------------------------------------------------------
+  # Torque-disabled safety state. This is infrastructure, not a policy.
   Passive:
     transitions:
       FixStand: LT + A.on_pressed
     mode: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
     kd:   [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
 
-  # ---------------------------------------------------------------------------
-  # FixStand holds the neutral quadruped pose and is the launchpad for the
-  # walking policies below. auto_velocity is disabled so the user must pick
-  # a policy explicitly via a joystick shortcut.
-  #
-  # EXPERIMENTAL (2026-04-18): final-hold pose changed from the symmetric
-  # quadruped (0, 0.8, -1.5) per leg to the Isaac Lab training default:
-  # hips ±0.1, front thighs 0.8, rear thighs 1.0, calves -1.5. Rationale:
-  # every downstream policy (Velocity, VelocityGuarded, BipedalRear) was
-  # trained with ``UNITREE_GO2_CFG.init_state.joint_pos`` = this pose, and
-  # the previous held pose sent the policies their first observation
-  # with a +0.2 rad rear-thigh bias (and a 0.1 rad hip splay mismatch).
-  # The Velocity policy absorbed the jerk fine; BipedalRear could not,
-  # because a bipedal stance is friction-margin-sensitive and any
-  # startup rocking transient adds to an already-marginal problem.
-  # Mid-ramp tuck pose at t=1 left symmetric — it's only a transient
-  # waypoint on the way down from a walking stance and asymmetric
-  # tucking would look unnatural.
+  # Fixed quadruped stance; the deployment launch state.
   FixStand:
     transitions:
-      Passive:                LT + B.on_pressed
-      # LT modifier = UNGUARDED gaits (no Surprise gate).
-      # LT + left = Pace — currently unbound (policy disabled in FSM list).
-      Velocity:               LT + down.on_pressed
-      Sport:                  LT + right.on_pressed
-      # The two bipedal entries route through the stand-up policy first; that
-      # policy auto-hands off to the walk policy after its configured duration
-      # (see BipedalStandUp / BipedalStandUpGuarded below). The chained step is
-      # internal — the user only sees a single press = bipedal walking.
-      BipedalStandUp:         LT + up.on_pressed
-      # LB modifier = GUARDED gaits (Surprise gate -> Stabilize on trip).
-      # LB + left and LB + right are reserved.
-      VelocityGuarded:        LB + down.on_pressed
-      BipedalStandUpGuarded:  LB + up.on_pressed
-      # Manual entry into the recovery policy. Bypasses the surprise auto-trip
-      # so the stabilize policy can be tested in isolation from any pose.
-      Stabilize:              start.on_pressed
+      Passive:  LT + B.on_pressed
+      Velocity: LT + down.on_pressed
     auto_velocity:
       enabled: false
     kp: [60, 80, 80, 60, 80, 80, 60, 80, 80, 60, 80, 80]
@@ -164,250 +43,14 @@ FSM:
     qs: [
       [],
       [0.0, 1.36, -2.65, 0.0, 1.36, -2.65, 0.0, 1.36, -2.65, 0.0, 1.36, -2.65],
-      [-0.1, 0.8, -1.5,  0.1, 0.8, -1.5, -0.1, 1.0, -1.5,  0.1, 1.0, -1.5],
+      [-0.1, 0.8, -1.5, 0.1, 0.8, -1.5, -0.1, 1.0, -1.5, 0.1, 1.0, -1.5],
     ]
 
-  # ---------------------------------------------------------------------------
-  # Plain quadruped velocity walking. Surprise is OFF, so the policy runs
-  # unconditionally until the user hits LT+A or LT+B.
+  # Completed contact-stabilized DVI rough policy deployment slot.
   Velocity:
     transitions:
-      FixStand:  LT + A.on_pressed
-      Stabilize: start.on_pressed
+      FixStand: LT + A.on_pressed
     policy_dir: ../../../logs/rsl_rl/unitree_go2_velocity_rough/0_best
-    # Alternative flat-terrain policy:
-    # policy_dir: ../../../logs/rsl_rl/unitree_go2_velocity/2026-04-18_09-28-18
-    #
-    # Matches RobotRoughEnvCfg.terminations.bad_orientation (1.2 rad).
     bad_orientation_limit: 1.2
     surprise:
-      enabled: false
-
-  # ---------------------------------------------------------------------------
-  # Pace gait quadruped walking (Unitree-Go2-Velocity-Rough-Pace training task).
-  # 45-dim quadruped obs / 12-dim actions, drop-in compatible with the Velocity
-  # state but with a different gait reward profile. Surprise is OFF.
-  #
-  # NOTE: currently INERT — ``enabled: false`` on the Pace entry in the FSM
-  # list above. The loader skips this state entirely (policy_dir / ONNX /
-  # deploy.yaml are not opened). Config preserved so the policy can be
-  # re-enabled with a one-line flip when it's validated.
-  Pace:
-    transitions:
-      FixStand:  LT + A.on_pressed
-      Stabilize: start.on_pressed
-    policy_dir: ../../../logs/rsl_rl/unitree_go2_velocity_rough_pace/0_best
-    bad_orientation_limit: 1.2
-    surprise:
-      enabled: false
-
-  # ---------------------------------------------------------------------------
-  # Sport gait quadruped walking (Unitree-Go2-Velocity-Rough-Sport training
-  # task). Higher-speed gait variant. Same obs/action layout as Velocity.
-  # Surprise is OFF.
-  Sport:
-    transitions:
-      FixStand:  LT + A.on_pressed
-      Stabilize: start.on_pressed
-    policy_dir: ../../../logs/rsl_rl/unitree_go2_velocity_rough_sport/0_best
-    bad_orientation_limit: 1.2
-    surprise:
-      enabled: false
-
-  # ---------------------------------------------------------------------------
-  # Velocity walking guarded by the Surprise forward-model. When surprise
-  # trips, we hand off to Stabilize, which auto-returns here after 0.5 s.
-  # Uses velocity_rough Surprise model trained on the rough terrain policy.
-  VelocityGuarded:
-    transitions:
-      FixStand:  LT + A.on_pressed
-      Stabilize: start.on_pressed
-    policy_dir: ../../../logs/rsl_rl/unitree_go2_velocity_rough/0_best
-    surprise:
-      enabled: true
-      target_fsm: Stabilize
-      model_path: ../../../../Surprise/models/velocity_rough/forward_model.onnx
-      stats_path: ../../../../Surprise/models/velocity_rough/normalization_stats.yaml
-      # Calibrated 2026-05-17 against the retrained surprise ONNX (Newton,
-      # 320k transitions, uniform commands in [-1,1] for lin_vel_x).
-      # Observed nominal EMA range during forward + backward + yaw walking
-      # is roughly [-100, +150]; command-change spikes inject a single-tick
-      # raw NLL up to ~2200 which the slow EMA absorbs to a brief peak of
-      # ~150. ``threshold=400`` gives ~2.7x headroom above that.
-      threshold: 400.0
-      ema_alpha: 0.05
-      use_ema: true
-      min_steps: 100
-      consecutive_steps: 10
-      log_every_steps: 500
-
-  # ---------------------------------------------------------------------------
-  # Stabilization policy: engaged when surprise trips on VelocityGuarded or
-  # BipedalRearGuarded (or manually via `start` from FixStand / any walk).
-  # Surprise is disabled here so we don't recurse.
-  #
-  # No auto-transition: once the robot is stable, the operator picks the next
-  # policy explicitly. The joystick map mirrors FixStand so the same muscle
-  # memory works from either neutral pose.
-  Stabilize:
-    transitions:
-      Passive:                LT + B.on_pressed
-      FixStand:               LT + A.on_pressed
-      # Same D-pad map as FixStand: LT = unguarded, LB = guarded.
-      # LT + left = Pace — currently unbound (policy disabled in FSM list).
-      Velocity:               LT + down.on_pressed
-      Sport:                  LT + right.on_pressed
-      BipedalStandUp:         LT + up.on_pressed
-      VelocityGuarded:        LB + down.on_pressed
-      BipedalStandUpGuarded:  LB + up.on_pressed
-    policy_dir: ../../../logs/rsl_rl/unitree_go2_stabilize/0_best
-    # Stabilize can be entered from any walking state (quad or bipedal), so the
-    # deploy-side fall cut-off must be wider than the widest source state. The
-    # bipedal-guarded states use 1.75 rad; we go to 2.5 rad (~143°) so an
-    # already-tipped-over robot (bipedal stance, on its side, etc.) is not
-    # rejected before the policy gets a single tick to act.
-    bad_orientation_limit: 2.5
-    surprise:
-      enabled: false
-    auto_transition:
-      enabled: false
-
-  # ---------------------------------------------------------------------------
-  # BipedalStandUp: chained transition state between FixStand and BipedalRear.
-  #
-  # The user presses LB+right (or LB+up) from FixStand. We enter this state,
-  # run the dedicated stand-up policy for ``auto_transition.duration_s``
-  # seconds, then hand the robot to the bipedal walking policy. The two
-  # variants below (BipedalStandUp -> BipedalRear, BipedalStandUpGuarded ->
-  # BipedalRearGuarded) only differ in their auto-transition target.
-  #
-  # ``duration_s`` is the only tuning knob the operator should normally touch:
-  # too short and the walking policy starts before the robot is upright;
-  # too long and the standup policy will fight to maintain a static bipedal
-  # pose past what it was trained for. 2.0 s is a reasonable starting point.
-  #
-  # Fall safety mirrors BipedalRear: large pitch from the bipedal target
-  # gravity or any significant roll trips the deploy-side cutoff.
-  #
-  # Surprise is intentionally disabled here — there is no dedicated forward
-  # model for the standup motion, so we just rely on duration_s + fall-safety.
-  BipedalStandUp:
-    transitions:
-      FixStand:  LT + A.on_pressed
-      Stabilize: start.on_pressed
-    policy_dir: ../../../logs/rsl_rl/unitree_go2_bipedal_standup/0_best
-    bad_orientation_limit: 1.75
-    bad_orientation_desired_gravity: [-1.0, 0.0, 0.0]
-    bad_roll_limit: 0.6
-    # Brief kp/kd ramp from FixStand's stiff gains (60/80/80, 5/4/4) into the
-    # standup policy's softer per-joint gains (~25, ~0.5). Without this the
-    # snap at handover briefly loses torque and the robot dips.
-    intro:
-      ts: [0.0, 0.3]
-      qs:
-        - []
-        - [-0.1, 0.8, -1.5,  0.1, 0.8, -1.5, -0.1, 1.0, -1.5,  0.1, 1.0, -1.5]
-      kp: [60, 80, 80, 60, 80, 80, 60, 80, 80, 60, 80, 80]
-      kd: [5, 4, 4, 5, 4, 4, 5, 4, 4, 5, 4, 4]
-    surprise:
-      enabled: false
-    auto_transition:
-      enabled: true
-      target_fsm: BipedalRear
-      duration_s: 2.0
-    csv_log:
-      enabled: false
-
-  # ---------------------------------------------------------------------------
-  # BipedalStandUpGuarded: same standup policy as BipedalStandUp; only the
-  # auto-transition target differs (BipedalRearGuarded instead of BipedalRear).
-  # Walking phase then runs under surprise monitoring.
-  BipedalStandUpGuarded:
-    transitions:
-      FixStand:  LT + A.on_pressed
-      Stabilize: start.on_pressed
-    policy_dir: ../../../logs/rsl_rl/unitree_go2_bipedal_standup/0_best
-    bad_orientation_limit: 1.75
-    bad_orientation_desired_gravity: [-1.0, 0.0, 0.0]
-    bad_roll_limit: 0.6
-    intro:
-      ts: [0.0, 0.3]
-      qs:
-        - []
-        - [-0.1, 0.8, -1.5,  0.1, 0.8, -1.5, -0.1, 1.0, -1.5,  0.1, 1.0, -1.5]
-      kp: [60, 80, 80, 60, 80, 80, 60, 80, 80, 60, 80, 80]
-      kd: [5, 4, 4, 5, 4, 4, 5, 4, 4, 5, 4, 4]
-    surprise:
-      enabled: false
-    auto_transition:
-      enabled: true
-      target_fsm: BipedalRearGuarded
-      duration_s: 2.0
-    csv_log:
-      enabled: false
-
-  # ---------------------------------------------------------------------------
-  # BipedalRear (rear-legs walk).
-  #
-  # Training env: Unitree-Go2-Bipedal-Walk-Rough (rough terrain with random
-  # bumps, slopes, boxes; flat quadruped spawn with expanded initial tilt).
-  #
-  # Entered only from BipedalStandUp (auto-transition) — the standup policy
-  # leaves the robot in a bipedal stance with kp/kd similar to this state's
-  # native gains, so no FixStand-style intro is needed here.
-  #
-  # bad_orientation_limit (1.75 rad ≈ 100°) is a deploy-side flip cutoff at
-  # the bipedal target gravity (-1, 0, 0). bad_roll_limit catches sideways
-  # tip-over (|g_b_y| > 0.6 ≈ 37°) independent of pitch deviation.
-  BipedalRear:
-    transitions:
-      FixStand:  LT + A.on_pressed
-      Stabilize: start.on_pressed
-    policy_dir: ../../../logs/rsl_rl/unitree_go2_bipedal_walk_rough/0_best
-    bad_orientation_limit: 1.75
-    bad_orientation_desired_gravity: [-1.0, 0.0, 0.0]
-    bad_roll_limit: 0.6
-    surprise:
-      enabled: false
-    # Per-step trajectory CSV for sim-to-sim diffing against play_deploy_fsm.py.
-    # Path is relative to the deploy project dir; omit ``path`` to auto-name the
-    # file as ``log/deploy_fsm/<state>_<YYYYmmdd_HHMMSS>.csv``.
-    csv_log:
-      enabled: false
-
-  # ---------------------------------------------------------------------------
-  # BipedalRearGuarded (rear-legs walk with Surprise monitoring).
-  #
-  # Same as BipedalRear but with Surprise forward-model enabled. When surprise
-  # trips, transitions to Stabilize. Stabilize does not auto-return; the
-  # operator picks the next state using the standard D-pad map.
-  BipedalRearGuarded:
-    transitions:
-      FixStand:  LT + A.on_pressed
-      Stabilize: start.on_pressed
-    policy_dir: ../../../logs/rsl_rl/unitree_go2_bipedal_walk_rough/0_best
-    bad_orientation_limit: 1.75
-    bad_orientation_desired_gravity: [-1.0, 0.0, 0.0]
-    bad_roll_limit: 0.6
-    surprise:
-      enabled: true
-      target_fsm: Stabilize
-      model_path: ../../../../Surprise/models/bipedal_walk_rough/forward_model.onnx
-      stats_path: ../../../../Surprise/models/bipedal_walk_rough/normalization_stats.yaml
-      # Calibration values, not final tuning. v4 reports val NLL ~-3.9/dim
-      # (= ~-525 summed); we observed EMA ~350-500 on hardware for the first
-      # ~2 s post BipedalStandUp -> BipedalRear hand-off. Raise threshold
-      # safely above that, delay the gate past the transient (min_steps),
-      # and slow the EMA (ema_alpha) so it averages sustained surprise
-      # rather than short-term spikes. Read the periodic "Surprise stats"
-      # log to find the steady-state EMA in nominal walking, then tighten
-      # threshold to ~2-3x that.
-      threshold: 500.0
-      ema_alpha: 0.05
-      use_ema: true
-      min_steps: 100
-      consecutive_steps: 10
-      # 500 steps = ~10 s at 50 Hz. Set to 0 to silence entirely.
-      log_every_steps: 500
-    csv_log:
       enabled: false

@@ -1,5 +1,198 @@
 import gymnasium as gym
 
+# Exact stock Isaac Lab Go2 flat-velocity baseline. This references the
+# maintained stock configuration directly; subsequent diagnostic variants can
+# replace one component at a time without duplicating its settings.
+gym.register(
+    id="Unitree-Go2-Velocity-Flat-StockDVI",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "isaaclab_tasks.manager_based.locomotion.velocity.config.go2.flat_env_cfg:UnitreeGo2FlatEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.manager_based.locomotion.velocity.config.go2.agents.rsl_rl_ppo_cfg:UnitreeGo2FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Unitree-Go2-Velocity-Flat-StockDVI-SelfCollision",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stock_dvi_ablations:UnitreeGo2FlatStockSelfCollisionEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.manager_based.locomotion.velocity.config.go2.agents.rsl_rl_ppo_cfg:UnitreeGo2FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Unitree-Go2-Velocity-Flat-StockDVI-MechanicalGroup",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stock_dvi_ablations:UnitreeGo2FlatStockMechanicalGroupEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.manager_based.locomotion.velocity.config.go2.agents.rsl_rl_ppo_cfg:UnitreeGo2FlatPPORunnerCfg",
+    },
+)
+
+# Binary split of the task-level regression: Unitree reset/command/disturbance
+# dynamics versus Unitree observations/rewards/terminations, both with stock PPO.
+gym.register(
+    id="Unitree-Go2-Velocity-Flat-StockDVI-DynamicsGroup",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stock_dvi_ablations:UnitreeGo2FlatStockDynamicsGroupEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.manager_based.locomotion.velocity.config.go2.agents.rsl_rl_ppo_cfg:UnitreeGo2FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Unitree-Go2-Velocity-Flat-StockDVI-LearningSignalGroup",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stock_dvi_ablations:UnitreeGo2FlatStockLearningSignalGroupEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.manager_based.locomotion.velocity.config.go2.agents.rsl_rl_ppo_cfg:UnitreeGo2FlatPPORunnerCfg",
+    },
+)
+
+# Second binary split of the learning-signal regression: observations versus
+# rewards/terminations. Both retain stock commands/events and stock PPO.
+gym.register(
+    id="Unitree-Go2-Velocity-Flat-StockDVI-ObservationsGroup",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stock_dvi_ablations:UnitreeGo2FlatStockObservationsGroupEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.manager_based.locomotion.velocity.config.go2.agents.rsl_rl_ppo_cfg:UnitreeGo2FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Unitree-Go2-Velocity-Flat-StockDVI-RewardDoneGroup",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stock_dvi_ablations:UnitreeGo2FlatStockRewardDoneGroupEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.manager_based.locomotion.velocity.config.go2.agents.rsl_rl_ppo_cfg:UnitreeGo2FlatPPORunnerCfg",
+    },
+)
+
+# Fourth binary split of the failing reward branch: tracking/base terms versus
+# joint/feet/contact penalties.
+gym.register(
+    id="Unitree-Go2-Velocity-Flat-StockDVI-CoreRewardsGroup",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stock_dvi_ablations:UnitreeGo2FlatStockCoreRewardsGroupEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.manager_based.locomotion.velocity.config.go2.agents.rsl_rl_ppo_cfg:UnitreeGo2FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Unitree-Go2-Velocity-Flat-StockDVI-JointFeetRewardsGroup",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stock_dvi_ablations:UnitreeGo2FlatStockJointFeetRewardsGroupEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.manager_based.locomotion.velocity.config.go2.agents.rsl_rl_ppo_cfg:UnitreeGo2FlatPPORunnerCfg",
+    },
+)
+
+# Fifth binary split of the failing joint/feet/contact reward branch.
+gym.register(
+    id="Unitree-Go2-Velocity-Flat-StockDVI-JointPenaltiesRewardsGroup",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stock_dvi_ablations:UnitreeGo2FlatStockJointPenaltiesRewardsGroupEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.manager_based.locomotion.velocity.config.go2.agents.rsl_rl_ppo_cfg:UnitreeGo2FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Unitree-Go2-Velocity-Flat-StockDVI-FootContactRewardsGroup",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stock_dvi_ablations:UnitreeGo2FlatStockFootContactRewardsGroupEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.manager_based.locomotion.velocity.config.go2.agents.rsl_rl_ppo_cfg:UnitreeGo2FlatPPORunnerCfg",
+    },
+)
+
+# Single-difference reward sweep. Each child retains stock rewards except for
+# one Unitree term (or Unitree replacement for its corresponding stock term).
+for _suffix, _cfg_class in (
+    ("JointVelReward", "UnitreeGo2FlatStockJointVelRewardEnvCfg"),
+    ("JointTorquesReward", "UnitreeGo2FlatStockJointTorquesRewardEnvCfg"),
+    ("ActionRateReward", "UnitreeGo2FlatStockActionRateRewardEnvCfg"),
+    ("DofPosLimitsReward", "UnitreeGo2FlatStockDofPosLimitsRewardEnvCfg"),
+    ("EnergyReward", "UnitreeGo2FlatStockEnergyRewardEnvCfg"),
+    ("JointPosReward", "UnitreeGo2FlatStockJointPosRewardEnvCfg"),
+    ("FeetAirTimeReward", "UnitreeGo2FlatStockFeetAirTimeRewardEnvCfg"),
+    ("AirTimeVarianceReward", "UnitreeGo2FlatStockAirTimeVarianceRewardEnvCfg"),
+    ("FeetSlideReward", "UnitreeGo2FlatStockFeetSlideRewardEnvCfg"),
+    ("UndesiredContactsReward", "UnitreeGo2FlatStockUndesiredContactsRewardEnvCfg"),
+):
+    gym.register(
+        id=f"Unitree-Go2-Velocity-Flat-StockDVI-{_suffix}",
+        entry_point="isaaclab.envs:ManagerBasedRLEnv",
+        disable_env_checker=True,
+        kwargs={
+            "env_cfg_entry_point": f"{__name__}.stock_dvi_ablations:{_cfg_class}",
+            "rsl_rl_cfg_entry_point": "isaaclab_tasks.manager_based.locomotion.velocity.config.go2.agents.rsl_rl_ppo_cfg:UnitreeGo2FlatPPORunnerCfg",
+        },
+    )
+
+# Final body-level split of the failing Unitree undesired-contact term.
+for _suffix, _cfg_class in (
+    ("UndesiredHipContactsReward", "UnitreeGo2FlatStockUndesiredHipContactsRewardEnvCfg"),
+    ("UndesiredThighContactsReward", "UnitreeGo2FlatStockUndesiredThighContactsRewardEnvCfg"),
+    ("UndesiredCalfContactsReward", "UnitreeGo2FlatStockUndesiredCalfContactsRewardEnvCfg"),
+):
+    gym.register(
+        id=f"Unitree-Go2-Velocity-Flat-StockDVI-{_suffix}",
+        entry_point="isaaclab.envs:ManagerBasedRLEnv",
+        disable_env_checker=True,
+        kwargs={
+            "env_cfg_entry_point": f"{__name__}.stock_dvi_ablations:{_cfg_class}",
+            "rsl_rl_cfg_entry_point": "isaaclab_tasks.manager_based.locomotion.velocity.config.go2.agents.rsl_rl_ppo_cfg:UnitreeGo2FlatPPORunnerCfg",
+        },
+    )
+
+# Third binary split: reward terms versus termination/contact semantics.
+gym.register(
+    id="Unitree-Go2-Velocity-Flat-StockDVI-RewardsGroup",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stock_dvi_ablations:UnitreeGo2FlatStockRewardsGroupEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.manager_based.locomotion.velocity.config.go2.agents.rsl_rl_ppo_cfg:UnitreeGo2FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Unitree-Go2-Velocity-Flat-StockDVI-TerminationsGroup",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stock_dvi_ablations:UnitreeGo2FlatStockTerminationsGroupEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.manager_based.locomotion.velocity.config.go2.agents.rsl_rl_ppo_cfg:UnitreeGo2FlatPPORunnerCfg",
+    },
+)
+
+# Full Unitree RL Lab MDP on the already-tested mechanical group, but retain
+# stock PPO. This is the parent task-level regression.
+gym.register(
+    id="Unitree-Go2-Velocity-Flat-StockPPO",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.velocity_env_cfg:RobotEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.manager_based.locomotion.velocity.config.go2.agents.rsl_rl_ppo_cfg:UnitreeGo2FlatPPORunnerCfg",
+    },
+)
+
 gym.register(
     id="Unitree-Go2-Velocity",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",

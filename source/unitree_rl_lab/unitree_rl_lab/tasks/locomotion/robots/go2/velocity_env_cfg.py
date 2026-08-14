@@ -2,11 +2,18 @@ import math
 
 import isaaclab.sim as sim_utils
 import isaaclab.terrains as terrain_gen
+from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab_physx.physics import PhysxCfg
-from isaaclab_newton.physics import NewtonCfg, MJWarpSolverCfg, NewtonCollisionPipelineCfg, NewtonShapeCfg
-from isaaclab_tasks.utils import PresetCfg
+from isaaclab_newton.physics import (
+    DVISolverCfg,
+    NewtonCfg,
+    MJWarpSolverCfg,
+    NewtonCollisionPipelineCfg,
+    NewtonShapeCfg,
+)
+from isaaclab_tasks.utils import PresetCfg, preset
 from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
@@ -296,6 +303,13 @@ class RewardsCfg:
 
     # -- robot
     flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-2.5)
+    # # Disabled by default in RobotEnvCfg.__post_init__. The controlled DVI
+    # # bootstrap experiment enables this dense clearance objective.
+    # dvi_bootstrap_base_height = RewTerm(
+    #     func=bipedal_mdp.base_height_l2,
+    #     weight=-10.0,
+    #     params={"target_height": 0.32},
+    # )
 
     joint_pos = RewTerm(
         func=mdp.joint_position_penalty,
@@ -308,11 +322,14 @@ class RewardsCfg:
     )
 
     # -- feet
+    # With Newton fixed-joint collapsing, Go2 foot geometry is represented by
+    # the corresponding calf body. Preserve the standard foot terms using the
+    # collapsed calf names.
     feet_air_time = RewTerm(
         func=mdp.feet_air_time,
         weight=0.1,
         params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_calf"),
             "command_name": "base_velocity",
             "threshold": 0.5,
         },
@@ -320,14 +337,14 @@ class RewardsCfg:
     air_time_variance = RewTerm(
         func=mdp.air_time_variance_penalty,
         weight=-1.0,
-        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot")},
+        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_calf")},
     )
     feet_slide = RewTerm(
         func=mdp.feet_slide,
         weight=-0.1,
         params={
-            "asset_cfg": SceneEntityCfg("robot", body_names=".*_foot"),
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*_calf"),
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_calf"),
         },
     )
     # feet_contact_forces = RewTerm(
@@ -345,7 +362,23 @@ class RewardsCfg:
         weight=-1,
         params={
             "threshold": 1,
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["Head_.*", ".*_hip", ".*_thigh", ".*_calf"]),
+            "sensor_cfg": SceneEntityCfg(
+                "contact_forces",
+                body_names=preset(
+                    default=[".*_hip", ".*_thigh", ".*_calf"],
+                    # Newton DVI collapses fixed foot joints into their calf bodies.
+                    # Consequently, ordinary foot-ground support contact is reported
+                    # as calf contact; penalizing it causes the velocity task to
+                    # collapse. Keep only genuinely undesired upper-leg contacts.
+                    # TODO: preserve separate calf-versus-foot contact identity when
+                    # fixed-joint collapsing is enabled, then restore the calf term.
+                    newton_dvi=[
+                        ".*_hip",
+                        ".*_thigh",
+                        # ".*_calf",  # Disabled: collapsed fixed feet report support contact as calf contact.
+                    ],
+                ),
+            ),
         },
     )
 
@@ -397,6 +430,35 @@ class VelocityFlatPhysicsCfg(PresetCfg):
         num_substeps=1,
         debug_mode=False,
     )
+    newton_dvi: NewtonCfg = NewtonCfg(
+        solver_cfg=DVISolverCfg(
+            joint_solver_type="sparse_ldl",
+            joint_alpha=0.0,
+            joint_recovery_speed=100000.0,
+            joint_iterative_refinement_steps=1,
+            joint_limit_solver_type="sparse_jacobi",
+            # DVI velocity-training contact configuration. Two coupling sweeps
+            # couple joint limits, bilateral joints, and contacts; skip the
+            # extra bilateral-only post-stabilization solve after those sweeps.
+            contact_solver_type="sparse_jacobi",
+            contact_max_iterations=10,
+            contact_alpha=0.0,
+            contact_recovery_speed=10.0,
+            coupling_iterations=2,
+            post_stabilize_joints=False,
+            angular_damping=0.0,
+            # Explicit DVI consumes the delayed, torque-speed-limited
+            # UnitreeActuator effort through Newton control.joint_f.
+            actuator_integration="explicit",
+        ),
+        num_substeps=2,
+        debug_mode=False,
+        use_cuda_graph=True,
+        # Match the latest validated bipedal DVI configuration.
+        collapse_fixed_joints=True,
+        default_shape_cfg=NewtonShapeCfg(gap=0.005),
+        collision_cfg=NewtonCollisionPipelineCfg(rigid_contact_max=665536),
+    )
     physx = default
 
 
@@ -427,6 +489,39 @@ class VelocityRoughPhysicsCfg(PresetCfg):
         debug_mode=False,
         default_shape_cfg=NewtonShapeCfg(margin=0.01),
     )
+    newton_dvi: NewtonCfg = NewtonCfg(
+        solver_cfg=DVISolverCfg(
+            joint_solver_type="sparse_ldl",
+            joint_alpha=0.0,
+            joint_recovery_speed=100000.0,
+            joint_position_correction=False,
+            joint_iterative_refinement_steps=1,
+            joint_limit_solver_type="sparse_jacobi",
+            joint_limit_ke_scale=0.1,
+            contact_solver_type="sparse_jacobi",
+            contact_max_iterations=20,
+            contact_omega=0.15,
+            contact_reg=1.0e-3,
+            contact_compliance=1.0e-7,
+            contact_alpha=0.0,
+            contact_recovery_speed=5.0,
+            contact_position_correction=False,
+            coupling_iterations=2,
+            post_stabilize_joints=False,
+            angular_damping=0.0,
+            actuator_integration="explicit",
+        ),
+        num_substeps=2,
+        debug_mode=False,
+        use_cuda_graph=True,
+        collapse_fixed_joints=True,
+        # Nonzero margin is required for stable triangle-mesh terrain contact.
+        default_shape_cfg=NewtonShapeCfg(gap=0.005),
+        collision_cfg=NewtonCollisionPipelineCfg(
+            rigid_contact_max=665536,
+            max_triangle_pairs=2_500_000,
+        ),
+    )
     physx = default
 
 
@@ -456,6 +551,16 @@ class RobotEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.render_interval = self.decimation
         self.sim.physics_material = self.scene.terrain.physics_material
         self.sim.physics = VelocityFlatPhysicsCfg()
+
+        # Keep the asset's default UnitreeActuatorCfg_Go2HV for every preset,
+        # including DVI.  It is the explicit delayed-PD model with the Go2HV
+        # torque-speed curve; DVI receives its clipped effort via joint_f.
+        # No newton_dvi actuator override is required: `preset` falls back to
+        # `default` when a backend-specific entry is absent.
+        self.scene.robot.actuators["GO2HV"] = preset(
+            default=self.scene.robot.actuators["GO2HV"],
+            newton_mjwarp=self.scene.robot.actuators["GO2HV"],
+        )
 
         # update sensor update periods
         # we tick all the sensors based on the smallest update period (physics update period)

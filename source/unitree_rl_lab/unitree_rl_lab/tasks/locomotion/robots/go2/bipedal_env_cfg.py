@@ -149,11 +149,12 @@ import math
 
 import isaaclab.sim as sim_utils
 import isaaclab.terrains as terrain_gen
+from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab_physx.physics import PhysxCfg
-from isaaclab_newton.physics import NewtonCfg, MJWarpSolverCfg, NewtonCollisionPipelineCfg, NewtonShapeCfg
-from isaaclab_tasks.utils import PresetCfg
+from isaaclab_newton.physics import DVISolverCfg, MJWarpSolverCfg, NewtonCfg, NewtonCollisionPipelineCfg, NewtonShapeCfg
+from isaaclab_tasks.utils import PresetCfg, preset
 from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
@@ -1510,6 +1511,31 @@ class BipedalFlatPhysicsCfg(PresetCfg):
         num_substeps=1,
         debug_mode=False,
     )
+    newton_dvi: NewtonCfg = NewtonCfg(
+        solver_cfg=DVISolverCfg(
+            joint_solver_type="sparse_ldl",
+            joint_alpha=0.005,
+            joint_recovery_speed=100000.0,
+            joint_position_correction=False,
+            joint_iterative_refinement_steps=1,
+            joint_limit_solver_type="sparse_jacobi",
+            joint_limit_max_iterations=10,
+            joint_limit_ke_scale=0.1,
+            contact_solver_type="sparse_jacobi",
+            contact_max_iterations=10,
+            contact_alpha=0.0,
+            contact_recovery_speed=1.0,
+            contact_position_correction=False,
+            angular_damping=0.0,
+            actuator_integration="semi_implicit",
+        ),
+        num_substeps=1,
+        debug_mode=False,
+        use_cuda_graph=True,
+        collapse_fixed_joints=True,
+        default_shape_cfg=NewtonShapeCfg(gap=0.005),
+        collision_cfg=NewtonCollisionPipelineCfg(rigid_contact_max=665536),
+    )
     physx = default
 
 
@@ -1582,6 +1608,56 @@ class RobotBipedalWalkEnvCfg(ManagerBasedRLEnvCfg):
         # ``self.sim.physx.<attr>`` (that API no longer exists).
         self.sim.physics_material = self.scene.terrain.physics_material
         self.sim.physics = BipedalFlatPhysicsCfg()
+        # The custom Unitree actuator emits explicit torques. DVI instead uses
+        # solver-integrated PD gains, matching the validated Isaac Lab Go2 DVI
+        # setup while preserving the MJWarp/PhysX actuator unchanged.
+        self.scene.robot.actuators["GO2HV"] = preset(
+            default=self.scene.robot.actuators["GO2HV"],
+            newton_mjwarp=self.scene.robot.actuators["GO2HV"],
+            newton_dvi=ImplicitActuatorCfg(
+                joint_names_expr=[".*"],
+                effort_limit_sim=23.5,
+                velocity_limit_sim=30.0,
+                stiffness=25.0,
+                damping=0.5,
+                friction=0.01,
+            ),
+        )
+        # Newton collapses each fixed foot into its calf. Use solver-specific
+        # contact-sensor names while retaining foot bodies for kinematic terms.
+        for reward_name in ("rear_feet_air_time", "rear_feet_flight", "rear_feet_slide"):
+            reward = getattr(self.rewards, reward_name)
+            reward.params["sensor_cfg"].body_names = preset(
+                default="R[LR]_foot",
+                newton_mjwarp="R[LR]_calf",
+                newton_dvi="R[LR]_calf",
+            )
+        for reward_name in ("rear_feet_clearance", "rear_feet_slide"):
+            reward = getattr(self.rewards, reward_name)
+            reward.params["asset_cfg"].body_names = preset(
+                default="R[LR]_foot",
+                newton_mjwarp="R[LR]_calf",
+                newton_dvi="R[LR]_calf",
+            )
+        self.rewards.front_foot_contact.params["sensor_cfg"].body_names = preset(
+            default="F[LR]_foot",
+            newton_mjwarp="F[LR]_calf",
+            newton_dvi="F[LR]_calf",
+        )
+        # Collapsing fixed joints makes foot contact indistinguishable from
+        # calf contact and head contact indistinguishable from base contact.
+        # Disable those two penalties for Newton rather than penalizing valid
+        # support contacts; base contact remains a termination condition.
+        self.rewards.calf_contact = preset(
+            default=self.rewards.calf_contact,
+            newton_mjwarp=None,
+            newton_dvi=None,
+        )
+        self.rewards.head_contact = preset(
+            default=self.rewards.head_contact,
+            newton_mjwarp=None,
+            newton_dvi=None,
+        )
         self.scene.contact_forces.update_period = self.sim.dt
 
 

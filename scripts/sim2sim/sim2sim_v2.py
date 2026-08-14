@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """MuJoCo sim2sim for Go2 bipedal walking — validated configuration.
 
-Direct translation of the working inline test with proper CLI interface.
-Uses 125 Hz control rate (dt=0.002, 4 substeps) + FixStand-level intro gains.
+MuJoCo sim2sim runner for Go2 checkpoints.
+Uses the policy's 50 Hz control interval (dt=0.002, 10 substeps) + FixStand-level intro gains.
 
 Usage:
     conda run -n go2 python sim2sim_v2.py \
@@ -85,13 +85,19 @@ def qri(q, v):
 def load_policy(path, device="cpu"):
     try:
         p = torch.jit.load(path, map_location=device); p.eval(); return p, True
-    except Exception: pass
+    except Exception:
+        pass
     from torch import nn
     ck = torch.load(path, map_location=device, weights_only=False)
     sd = ck.get("actor_state_dict", ck.get("model_state_dict"))
-    a = nn.Sequential(nn.Linear(135,512),nn.ELU(),nn.Linear(512,256),nn.ELU(),
-                       nn.Linear(256,128),nn.ELU(),nn.Linear(128,12))
-    a.load_state_dict({k.replace("mlp.",""):v for k,v in sd.items() if "mlp" in k}, strict=True)
+    first_weight = sd.get("mlp.0.weight")
+    if first_weight is None:
+        raise ValueError("Checkpoint does not contain actor mlp.0.weight.")
+    obs_dim = first_weight.shape[1]
+    act_dim = sd["mlp.6.weight"].shape[0]
+    a = nn.Sequential(nn.Linear(obs_dim,512),nn.ELU(),nn.Linear(512,256),nn.ELU(),
+                       nn.Linear(256,128),nn.ELU(),nn.Linear(128,act_dim))
+    a.load_state_dict({k.replace("mlp.",""):v for k,v in sd.items() if k.startswith("mlp.")}, strict=True)
     a.eval(); return a, False
 
 def main():
@@ -104,6 +110,12 @@ def main():
     p.add_argument("--csv", default=None)
     p.add_argument("--cmd-vx", type=float, default=0.0)
     p.add_argument("--cmd-yaw", type=float, default=0.0)
+    p.add_argument(
+        "--history-length",
+        type=int,
+        default=None,
+        help="Observation-history length; default infers one frame from the checkpoint actor.",
+    )
     p.add_argument("--sim-dt", type=float, default=None, help="Override MuJoCo sim timestep (smaller=more stable)")
     p.add_argument("--backend", choices=["physx", "newton", "auto"], default="auto",
                    help="Joint ordering: physx, newton, or auto-detect from deploy.yaml")
@@ -147,8 +159,31 @@ def main():
         dpos = np.array(cfg["default_joint_pos"])
 
     policy, is_jit = load_policy(args.checkpoint)
+    if is_jit:
+        try:
+            actor_obs_dim = next(policy.parameters()).shape[1]
+        except StopIteration as exc:
+            raise ValueError("Cannot infer actor observation dimension from TorchScript policy.") from exc
+    else:
+        actor_obs_dim = policy[0].in_features
+    if args.history_length is None:
+        # Observation layout: 3H angular velocity + 3H gravity + 3 command
+        # + 12H joint position + 12H joint velocity + 12 last action = 15 + 30H.
+        if (actor_obs_dim - 15) % 30:
+            raise ValueError(f"Unsupported actor observation dimension {actor_obs_dim}; expected 15 + 30H.")
+        hist = (actor_obs_dim - 15) // 30
+    else:
+        hist = args.history_length
+        expected_obs_dim = 15 + 30 * hist
+        if actor_obs_dim != expected_obs_dim:
+            raise ValueError(
+                f"history_length={hist} requires {expected_obs_dim} actor inputs, but policy expects {actor_obs_dim}."
+            )
     print(f"MuJoCo dt={dt}, ctrl_dt={ctrl_dt} ({1/ctrl_dt:.0f} Hz), substeps={substeps}")
-    print(f"Policy: {'JIT' if is_jit else 'sd'}, kp={kp.mean():.1f}, kd={kd.mean():.3f}")
+    print(
+        f"Policy: {'JIT' if is_jit else 'sd'}, obs_dim={actor_obs_dim}, history={hist}, "
+        f"kp={kp.mean():.1f}, kd={kd.mean():.3f}"
+    )
 
     # ─── Init ────────────────────────────────────────────────────────
     data.qpos[:3] = [0, 0, 0.31]; data.qpos[3:7] = [1, 0, 0, 0]
@@ -175,7 +210,6 @@ def main():
     print(f"  Warmup done (1.2s): z={data.qpos[2]:.4f}")
 
     # ─── Policy ──────────────────────────────────────────────────────
-    hist = 4
     ang_buf = deque(maxlen=hist); grav_buf = deque(maxlen=hist)
     jpos_buf = deque(maxlen=hist); jvel_buf = deque(maxlen=hist)
     quat = data.qpos[3:7]; pg = qri(quat, np.array([0., 0., -1.])); av = data.qvel[3:6].copy()
