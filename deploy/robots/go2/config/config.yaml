@@ -5,8 +5,8 @@
 # Controls
 #   LT + A     Passive / policy states -> FixStand
 #   LT + B     FixStand -> Passive
-#   LT + Down  FixStand -> Velocity (rough-terrain quadruped policy)
-#   LT + Up    FixStand -> BipedalVelocity (rough-terrain bipedal policy)
+#   LT + Down  FixStand -> VelocityDVI (rough-terrain quadrupedal DVI policy)
+#   LT + Up    FixStand -> BipedalVelocityDVI (rough-terrain bipedal DVI policy)
 #
 # To remove torque from either policy, press LT+A to return to FixStand, then LT+B.
 #
@@ -20,10 +20,10 @@ FSM:
       id: 1
     FixStand:
       id: 2
-    Velocity:
+    VelocityDVI:
       id: 3
       type: RLBase
-    BipedalVelocity:
+    BipedalVelocityDVI:
       id: 4
       type: RLBase
 
@@ -38,8 +38,8 @@ FSM:
   FixStand:
     transitions:
       Passive:  LT + B.on_pressed
-      Velocity: LT + down.on_pressed
-      BipedalVelocity: LT + up.on_pressed
+      VelocityDVI: LT + down.on_pressed
+      BipedalVelocityDVI: LT + up.on_pressed
     auto_velocity:
       enabled: false
     kp: [60, 80, 80, 60, 80, 80, 60, 80, 80, 60, 80, 80]
@@ -51,20 +51,20 @@ FSM:
       [-0.1, 0.8, -1.5, 0.1, 0.8, -1.5, -0.1, 1.0, -1.5, 0.1, 1.0, -1.5],
     ]
 
-  # Rough-terrain quadrupedal velocity policy.
-  Velocity:
+  # Rough-terrain quadrupedal Newton-DVI velocity policy.
+  VelocityDVI:
     transitions:
       FixStand: LT + A.on_pressed
-    policy_dir: ../../../logs/rsl_rl/unitree_go2_velocity_rough/0_best
+    policy_dir: ../../../../logs/rsl_rl/unitree_go2_velocity_rough/0_best_dvi
     bad_orientation_limit: 1.2
     surprise:
       enabled: false
 
-  # Rough-terrain bipedal velocity policy.
-  BipedalVelocity:
+  # Rough-terrain bipedal Newton-DVI walking policy.
+  BipedalVelocityDVI:
     transitions:
       FixStand: LT + A.on_pressed
-    policy_dir: ../../../logs/rsl_rl/unitree_go2_bipedal_walk_rough/0_best
+    policy_dir: ../../../../logs/rsl_rl/unitree_go2_bipedal_walk_rough/0_best_dvi
     bad_orientation_limit: 1.2
     surprise:
       enabled: false
