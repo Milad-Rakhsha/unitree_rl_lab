@@ -3,6 +3,7 @@ project(go2_controller)
 
 find_package(Boost REQUIRED COMPONENTS program_options)
 find_package(yaml-cpp REQUIRED)
+find_package(unitree_sdk2 REQUIRED)
 
 include_directories(
   /usr/include/eigen3

@@ -1,12 +1,15 @@
 # =============================================================================
-# Go2 deployment FSM: fixed stance + rough-terrain quadruped and bipedal policies
+# Go2 native-MuJoCo DDS deployment: fixed stance + MJWarp/DVI policy packages
 # =============================================================================
 #
 # Controls
 #   LT + A     Passive / policy states -> FixStand
 #   LT + B     FixStand -> Passive
-#   LT + Down  FixStand -> VelocityDVI (rough-terrain quadrupedal DVI policy)
-#   LT + Up    FixStand -> BipedalVelocityDVI (rough-terrain bipedal DVI policy)
+#   LT + Down  FixStand -> VelocityDVI (quadrupedal DVI package)
+#   LT + Up    FixStand -> VelocityMJWarp (quadrupedal MJWarp package)
+#
+# The native executable always uses MuJoCo+DDS.  DVI/MJWarp label the policy
+# package provenance; they do not select a native physics solver.
 #
 # To remove torque from either policy, press LT+A to return to FixStand, then LT+B.
 #
@@ -23,7 +26,7 @@ FSM:
     VelocityDVI:
       id: 3
       type: RLBase
-    BipedalVelocityDVI:
+    VelocityMJWarp:
       id: 4
       type: RLBase
 
@@ -39,7 +42,7 @@ FSM:
     transitions:
       Passive:  LT + B.on_pressed
       VelocityDVI: LT + down.on_pressed
-      BipedalVelocityDVI: LT + up.on_pressed
+      VelocityMJWarp: LT + up.on_pressed
     auto_velocity:
       enabled: false
     kp: [60, 80, 80, 60, 80, 80, 60, 80, 80, 60, 80, 80]
@@ -55,16 +58,18 @@ FSM:
   VelocityDVI:
     transitions:
       FixStand: LT + A.on_pressed
-    policy_dir: ../../../../logs/rsl_rl/unitree_go2_velocity_rough/0_best_dvi
+    policy_dir: ../../../logs/rsl_rl/unitree_go2_velocity_rough/0_best_dvi
     bad_orientation_limit: 1.2
     surprise:
       enabled: false
 
-  # Rough-terrain bipedal Newton-DVI walking policy.
-  BipedalVelocityDVI:
+  # Rough-terrain quadrupedal MJWarp velocity policy.  It shares the same
+  # deployment contract as DVI: deploy.yaml determines policy cadence,
+  # observation layout, gains, and joint ordering.
+  VelocityMJWarp:
     transitions:
       FixStand: LT + A.on_pressed
-    policy_dir: ../../../../logs/rsl_rl/unitree_go2_bipedal_walk_rough/0_best_dvi
+    policy_dir: ../../../logs/rsl_rl/unitree_go2_velocity_rough/0_best
     bad_orientation_limit: 1.2
     surprise:
       enabled: false

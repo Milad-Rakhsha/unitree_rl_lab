@@ -59,10 +59,18 @@ public:
         }
 
 
-        // set initial position
+        // Start interpolation from the measured pose, not the previous command.
+        // On Passive -> FixStand the prior command is commonly q=0 while the
+        // simulator/hardware is being held in a nominal stand. Interpolating
+        // from that stale command folded all legs through an unsupported pose
+        // and inverted the base before the RL state was entered.
         std::vector<float> q0;
-        for(int i(0); i < kp.size(); ++i) {
-            q0.push_back(lowcmd->msg_.motor_cmd()[i].q());
+        {
+            std::lock_guard<std::mutex> lock(lowstate->mutex_);
+            for (int i = 0; i < kp.size(); ++i)
+            {
+                q0.push_back(lowstate->msg_.motor_state()[i].q());
+            }
         }
         qs_[0] = q0;
         t0_ = (double)unitree::common::GetCurrentTimeMillisecond() * 1e-3;
