@@ -55,7 +55,7 @@ FSM:
   VelocityDVI:
     transitions:
       FixStand: LT + A.on_pressed
-    policy_dir: ../../../../logs/rsl_rl/unitree_go2_velocity_rough/0_best_dvi
+    policy_dir: ../../../logs/rsl_rl/unitree_go2_velocity_rough/0_best_dvi
     bad_orientation_limit: 1.2
     surprise:
       enabled: false
@@ -64,7 +64,10 @@ FSM:
   BipedalVelocityDVI:
     transitions:
       FixStand: LT + A.on_pressed
-    policy_dir: ../../../../logs/rsl_rl/unitree_go2_bipedal_walk_rough/0_best_dvi
-    bad_orientation_limit: 1.2
+    policy_dir: ../../../logs/rsl_rl/unitree_go2_bipedal_walk_rough/0_best_dvi
+    bad_orientation_limit: 2.1
+    bad_orientation_desired_gravity: [-1.0, 0.0, 0.0]
+    bad_roll_limit: 0.8
     surprise:
       enabled: false
+
