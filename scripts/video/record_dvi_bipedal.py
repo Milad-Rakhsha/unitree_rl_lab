@@ -25,9 +25,19 @@ parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--num-envs", type=int, default=1, help="Number of simultaneous environments to render.")
 parser.add_argument("--focus-left", action="store_true", help="Zoom and focus on the left side of a multi-environment grid.")
 parser.add_argument("--preset", choices=("newton_dvi", "newton_mjwarp"), default="newton_dvi")
+parser.add_argument("--zero-command", action="store_true", help="Set every velocity command to zero.")
+parser.add_argument("--flat-terrain", action="store_true", help="Replace the configured terrain with a flat plane.")
 parser.add_argument("--joint-limit-iterations", type=int)
 parser.add_argument("--coupling-iterations", type=int)
 parser.add_argument("--disable-post-stabilization", action="store_true")
+parser.add_argument(
+    "--contact-solver-type",
+    choices=("sparse_jacobi", "sparse_apgd", "sparse_aspg", "sparse_pspg", "sparse_block_gs"),
+)
+parser.add_argument("--contact-max-iterations", type=int)
+parser.add_argument("--contact-tolerance", type=float)
+parser.add_argument("--contact-omega", type=float)
+parser.add_argument("--contact-compliance", type=float)
 parser.add_argument("--contact-regularization", type=float)
 parser.add_argument("--contact-recovery-speed", type=float)
 parser.add_argument("--contact-alpha", type=float)
@@ -64,12 +74,34 @@ def main() -> None:
     task = args.task
     cfg = load_cfg_from_registry(task, "play_env_cfg_entry_point")
     cfg = resolve_presets(cfg, {args.preset})
+    if args.flat_terrain:
+        cfg.scene.terrain.terrain_type = "plane"
+        cfg.scene.terrain.terrain_generator = None
+    if args.zero_command:
+        command_cfg = cfg.commands.base_velocity
+        for ranges in (command_cfg.ranges, command_cfg.limit_ranges):
+            ranges.lin_vel_x = (0.0, 0.0)
+            ranges.lin_vel_y = (0.0, 0.0)
+            ranges.ang_vel_z = (0.0, 0.0)
+        command_cfg.rel_standing_envs = 1.0
+        cfg.curriculum.lin_vel_cmd_levels = None
+        cfg.curriculum.ang_vel_cmd_levels = None
     if args.joint_limit_iterations is not None:
         cfg.sim.physics.solver_cfg.joint_limit_max_iterations = args.joint_limit_iterations
     if args.coupling_iterations is not None:
         cfg.sim.physics.solver_cfg.coupling_iterations = args.coupling_iterations
     if args.disable_post_stabilization:
         cfg.sim.physics.solver_cfg.post_stabilize_joints = False
+    if args.contact_solver_type is not None:
+        cfg.sim.physics.solver_cfg.contact_solver_type = args.contact_solver_type
+    if args.contact_max_iterations is not None:
+        cfg.sim.physics.solver_cfg.contact_max_iterations = args.contact_max_iterations
+    if args.contact_tolerance is not None:
+        cfg.sim.physics.solver_cfg.contact_tolerance = args.contact_tolerance
+    if args.contact_omega is not None:
+        cfg.sim.physics.solver_cfg.contact_omega = args.contact_omega
+    if args.contact_compliance is not None:
+        cfg.sim.physics.solver_cfg.contact_compliance = args.contact_compliance
     if args.contact_regularization is not None:
         cfg.sim.physics.solver_cfg.contact_reg = args.contact_regularization
     if args.contact_recovery_speed is not None:
@@ -86,27 +118,12 @@ def main() -> None:
     cfg.seed = args.seed
     cfg.sim.device = args.device
     cfg.sim.enable_newton_rendering = True
-    # One viewport that encompasses the replicated scene.  The 64-env case is
-    # an 8x8 layout with 2.5 m spacing, so use an elevated wide shot; retain
-    # the close single-robot framing for ordinary videos.
-    if args.num_envs == 1:
-        eye, lookat = (3.0, -3.0, 1.7), (0.0, 0.0, 0.55)
+    # Fixed bipedal-rough playback framing, selected for gait inspection.
+    # For explicit multi-environment overview renders, frame env_0 at the origin.
+    if args.focus_left:
+        eye, lookat, camera_fov = (-6.0, -6.0, 3.0), (0.0, 0.0, 0.7), 35.0
     else:
-        # Isaac Lab packs replicated environments on a near-square grid.  The
-        # default is a wide grid shot; --focus-left deliberately zooms into
-        # the leftmost two columns for inspectable gait behavior.
-        cols = int(np.ceil(np.sqrt(args.num_envs)))
-        rows = int(np.ceil(args.num_envs / cols))
-        extent_x = 2.5 * (cols - 1)
-        extent_y = 2.5 * (rows - 1)
-        if args.focus_left:
-            eye = (2.5, -7.0, 5.5)
-            lookat = (0.0, 2.5 * min(rows - 1, 3) / 2.0, 0.45)
-        else:
-            span = max(extent_x, extent_y)
-            center_x, center_y = 0.5 * extent_x, 0.5 * extent_y
-            eye = (center_x + 0.90 * span, -0.90 * span, 0.78 * span)
-            lookat = (center_x, center_y, 0.45)
+        eye, lookat, camera_fov = (-22.0, -3.0, 3.0), (-25.0, 2.0, 2.0), 25.0
     cfg.sim.visualizer_cfgs = [
         NewtonVisualizerCfg(
             headless=True,
@@ -133,6 +150,7 @@ def main() -> None:
     )
     if viewer is None:
         raise RuntimeError("Newton framebuffer viewer was not initialized")
+    viewer.camera.fov = camera_fov
 
     obs = env.get_observations()
     if isinstance(obs, tuple):

@@ -14,8 +14,10 @@
 
 set -euo pipefail
 
-eval "$($HOME/miniconda3/bin/conda shell.bash hook)"
-conda activate go2
+CONDA_EXE="${CONDA_EXE:-$HOME/miniforge3/bin/conda}"
+CONDA_ENV="${CONDA_ENV:-dvi}"
+eval "$("$CONDA_EXE" shell.bash hook)"
+conda activate "$CONDA_ENV"
 export DISPLAY=${DISPLAY:-:99}
 export MUJOCO_GL=${MUJOCO_GL:-egl}
 
@@ -56,7 +58,8 @@ python -c "
 import sys, os, math
 sys.path.insert(0, '.')
 from sim2sim_v2 import load_policy, clip_torque, qri, detect_joint_ordering, get_mappings
-import mujoco, numpy as np, torch, mediapy, yaml
+import imageio.v2 as imageio
+import mujoco, numpy as np, torch, yaml
 from collections import deque
 
 SCENE = '$SCENE'
@@ -183,6 +186,6 @@ else:
     print(f'SURVIVED {DURATION}s! z={data.qpos[2]:.3f} x={data.qpos[0]:.2f}')
 
 print(f'Saving {len(frames)} frames -> {OUTPUT}')
-mediapy.write_video(OUTPUT, frames, fps=25)
+imageio.mimwrite(OUTPUT, frames, fps=25, codec='libx264', quality=8)
 print(f'Done: {OUTPUT}')
 "

@@ -5,10 +5,9 @@ os.environ['MUJOCO_GL'] = 'egl'
 Sim2Sim FSM test: headless MuJoCo + DDS bridge + virtual joystick + video.
 
 Runs Go2 in MuJoCo with the go2_ctrl control stack over DDS, injecting
-scripted joystick commands that walk through the FSM scenario:
+scripted joystick commands that walk through the current FSM scenario:
 
-  Passive → FixStand → VelocityGuarded (quad walk) → Stabilize → 
-  BipedalStandUp → BipedalRear (bipedal walk) → FixStand → Passive
+  Passive → FixStand → BipedalVelocityDVI → FixStand → Passive
 
 Each section is labeled in the output video for clarity.
 """
@@ -45,24 +44,29 @@ from unitree_sdk2py.idl.default import (
 # --------------------------------------------------------------------------
 # Configuration
 # --------------------------------------------------------------------------
-MUJOCO_SCENE = os.path.expanduser(
-    "~/Repos/GO2/unitree_mujoco/unitree_robots/go2/scene_flat_offscreen.xml"
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+MUJOCO_SCENE = os.path.join(
+    os.path.dirname(REPO_ROOT), "unitree_mujoco", "unitree_robots", "go2", "scene_flat.xml"
 )
-DEPLOY_DIR = os.path.expanduser(
-    "~/Repos/GO2/unitree_rl_lab/deploy/robots/go2"
-)
-GO2_CTRL = os.path.join(DEPLOY_DIR, "build", "go2_ctrl")
-ONNX_RT_LIB = os.path.expanduser(
-    "~/Repos/GO2/unitree_rl_lab/deploy/thirdparty/onnxruntime-linux-x64-1.22.0/lib"
+DEPLOY_DIR = os.path.join(REPO_ROOT, "deploy", "robots", "go2")
+GO2_CTRL = os.environ.get("GO2_CTRL", os.path.join(DEPLOY_DIR, "build", "go2_ctrl"))
+ONNX_RT_LIB = os.path.join(
+    REPO_ROOT, "deploy", "thirdparty", "onnxruntime-linux-x64-1.22.0", "lib"
 )
 
 DOMAIN_ID = 0
 INTERFACE = "lo"
-SIM_DT = 0.001  # MuJoCo timestep
-CTRL_DT = 0.001  # Bridge publish rate (matches C++ bridge at 1kHz)
+# Match the successful standalone transfer's scene physics exactly.
+SIM_DT = 0.002
+CTRL_DT = 0.002
+# The C++ controller runs at 1 kHz but only needs fresh robot state at 100 Hz.
+# Publishing every physics step previously accumulated DDS samples and delayed
+# each virtual joystick edge until after the visual scenario had completed.
+STATE_PUBLISH_DT = 0.01
 RENDER_FPS = 30
-RENDER_W = 1280
-RENDER_H = 720
+# scene_flat.xml declares a 640×480 offscreen framebuffer.
+RENDER_W = 640
+RENDER_H = 480
 OUTPUT_VIDEO = "/tmp/sim2sim_fsm_test.mp4"
 
 # --------------------------------------------------------------------------
@@ -94,53 +98,27 @@ def make_keys(*names):
 #   cmd_vy = -joystick->lx()   → lx = lateral (positive lx = move left)
 #   cmd_wz = -joystick->rx()   → rx = yaw rate (positive rx = turn left)
 #
-# Scenario order: Bipedal first, then stabilize, then quadruped.
+# Select the policy path without rewriting the test.  Default remains the
+# bipedal regression; SIM2SIM_POLICY=velocity exercises the quadrupedal DVI.
+TEST_POLICY = os.environ.get("SIM2SIM_POLICY", "bipedal").lower()
+if TEST_POLICY not in {"bipedal", "velocity"}:
+    raise ValueError("SIM2SIM_POLICY must be 'bipedal' or 'velocity'")
+POLICY_STATE = "BipedalVelocityDVI" if TEST_POLICY == "bipedal" else "VelocityDVI"
+POLICY_BUTTON = "up" if TEST_POLICY == "bipedal" else "down"
+
+# Scenario order: chosen policy first, then stabilize, then quadruped.
 FSM_SCENARIO = [
-    # --- Phase 1: Bipedal ---
-    # 1. Passive -> FixStand (LT+A)
     ("Passive -> FixStand", 4.0, ["L2", "A"], 0, 0, 0, 0),
-    # 2. FixStand -> BipedalStandUp (LT+up, auto->BipedalRear after 2s)
-    ("FixStand -> Bipedal StandUp", 1.0, ["L2", "up"], 0, 0, 0, 0),
-    # 3. Standup + auto-transition to walk
-    ("Bipedal StandUp -> Walk", 4.0, [], 0, 0, 0, 0),
-    # 4. Bipedal walk forward (ly=0.3, gentle)
-    ("Bipedal Walk (forward)", 8.0, [], 0, 0.3, 0, 0),
-    # 5. Bipedal walk backward (ly=-0.2, gentle)
-    ("Bipedal Walk (backward)", 5.0, [], 0, -0.2, 0, 0),
-    # 6. Bipedal walk turn (forward + yaw)
-    ("Bipedal Walk (turn)", 6.0, [], 0, 0.2, 0.3, 0),
-    # 7. Bipedal -> FixStand (LT+A)
-    ("Bipedal Walk -> FixStand", 1.0, ["L2", "A"], 0, 0, 0, 0),
-    # 8. Rest in FixStand
-    ("FixStand (rest)", 3.0, [], 0, 0, 0, 0),
-
-    # --- Phase 2: Stabilize (from FixStand) ---
-    # 9. FixStand -> Stabilize (start)
-    ("FixStand -> Stabilize", 1.0, ["start"], 0, 0, 0, 0),
-    # 10. Stabilize recovery hold
-    ("Stabilize (recovery)", 4.0, [], 0, 0, 0, 0),
-    # 11. Stabilize -> FixStand (LT+A)
-    ("Stabilize -> FixStand", 1.0, ["L2", "A"], 0, 0, 0, 0),
-    # 12. Rest in FixStand
-    ("FixStand (rest)", 2.0, [], 0, 0, 0, 0),
-
-    # --- Phase 3: Quadruped ---
-    # 13. FixStand -> VelocityGuarded (LB+down)
-    ("FixStand -> Quad Walk", 1.0, ["L1", "down"], 0, 0, 0, 0),
-    # 14. Quad walk forward (ly > 0)
-    ("Quad Walk (forward)", 5.0, [], 0, 0.5, 0, 0),
-    # 15. Quad walk backward (ly < 0)
-    ("Quad Walk (backward)", 3.0, [], 0, -0.3, 0, 0),
-    # 16. Quad walk turn (forward + yaw)
-    ("Quad Walk (turn)", 3.0, [], 0, 0.3, 0.5, 0),
-    # 17. Quad -> FixStand (LT+A)
-    ("Quad Walk -> FixStand", 1.0, ["L2", "A"], 0, 0, 0, 0),
-    # 18. Final FixStand
-    ("FixStand (final)", 2.0, [], 0, 0, 0, 0),
-    # 19. FixStand -> Passive (LT+B)
+    ("FixStand settle", 3.0, [], 0, 0, 0, 0),
+    (f"FixStand -> {POLICY_STATE}", 3.0, ["L2", POLICY_BUTTON], 0, 0, 0, 0),
+    (f"{POLICY_STATE} settle", 4.0, [], 0, 0, 0, 0),
+    (f"{POLICY_STATE} forward", 5.0, [], 0, 0.3, 0, 0),
+    (f"{POLICY_STATE} lateral", 4.0, [], -0.2, 0, 0, 0),
+    (f"{POLICY_STATE} yaw", 4.0, [], 0, 0, 0.25, 0),
+    (f"{POLICY_STATE} combined", 5.0, [], -0.15, 0.2, 0.2, 0),
+    (f"{POLICY_STATE} -> FixStand", 1.0, ["L2", "A"], 0, 0, 0, 0),
     ("FixStand -> Passive", 1.0, ["L2", "B"], 0, 0, 0, 0),
-    # 20. End
-    ("Passive (end)", 2.0, [], 0, 0, 0, 0),
+    ("Passive", 2.0, [], 0, 0, 0, 0),
 ]
 
 
@@ -224,6 +202,10 @@ class DDSBridge:
         self.num_motor = mj_model.nu
         self.lock = threading.Lock()
         self.running = True
+        # Keep the robot in the verified nominal pose until the FSM has entered
+        # FixStand.  Otherwise the 10 s controller warm-up occurs in Passive,
+        # whose zero-Kp command lets the model collapse before the test starts.
+        self.force_nominal_hold = True
 
         # State message
         self.low_state = LowState_default()
@@ -268,15 +250,44 @@ class DDSBridge:
             elif name == "frame_vel":
                 self.frame_vel_adr = adr
 
+    def initialize_nominal_pose(self, q_nominal):
+        """Put the free base and motors at the policy's saved nominal state."""
+        self.d.qpos[:3] = [0.0, 0.0, 0.31]
+        self.d.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
+        self.d.qvel[:] = 0.0
+        for motor_id, q in enumerate(q_nominal):
+            joint_id = self.m.actuator_trnid[motor_id, 0]
+            self.d.qpos[self.m.jnt_qposadr[joint_id]] = q
+        mujoco.mj_forward(self.m, self.d)
+
+    def apply_nominal_hold(self, q_nominal):
+        """Match the recorder's high-gain pre-policy settling controller."""
+        for motor_id, target in enumerate(q_nominal):
+            q = self.d.sensordata[motor_id]
+            dq = self.d.sensordata[motor_id + self.num_motor]
+            tau = 60.0 * (target - q) - 5.0 * dq
+            peak = 20.2 if dq * tau > 0.0 else 23.4
+            speed = abs(dq)
+            limit = peak if speed < 13.5 else max(0.0, peak * (30.0 - speed) / (30.0 - 13.5))
+            self.d.ctrl[motor_id] = np.clip(tau, -limit, limit)
+
     def _on_cmd(self, msg):
+        if self.force_nominal_hold:
+            return
         with self.lock:
             for i in range(self.num_motor):
                 mc = msg.motor_cmd[i]
-                self.d.ctrl[i] = (
+                tau = (
                     mc.tau
                     + mc.kp * (mc.q - self.d.sensordata[i])
                     + mc.kd * (mc.dq - self.d.sensordata[i + self.num_motor])
                 )
+                # Match UnitreeActuator/standalone transfer: Go2HV speed envelope.
+                qvel = self.d.sensordata[i + self.num_motor]
+                peak = 20.2 if qvel * tau > 0.0 else 23.4
+                speed = abs(qvel)
+                limit = peak if speed < 13.5 else max(0.0, peak * (30.0 - speed) / (30.0 - 13.5))
+                self.d.ctrl[i] = np.clip(tau, -limit, limit)
 
     def publish_state(self):
         """Publish lowstate + wireless controller. Call at ~1kHz."""
@@ -331,8 +342,9 @@ class DDSBridge:
             self.high_state.velocity[2] = sd[self.frame_vel_adr + 2]
         self.high_pub.Write(self.high_state)
 
-        # Wireless controller
-        self.joy.update()
+        # Wireless controller. The scenario loop owns key lifetimes; calling
+        # VirtualJoystick.update() here would clear every scripted transition
+        # because no set_pulse() deadline is installed.
         self.wc.keys = self.joy.keys
         self.wc.lx = self.joy.lx
         self.wc.ly = self.joy.ly
@@ -388,7 +400,12 @@ def main():
 
     joy = VirtualJoystick()
     bridge = DDSBridge(m, d, joy)
-    print("DDS bridge ready.")
+    # SDK/MuJoCo motor order, obtained by permuting deploy.yaml's policy order
+    # through joint_ids_map.  This is the same state held by FixStand.
+    nominal_motor_q = np.array([-0.1, 0.8, -1.5, 0.1, 0.8, -1.5,
+                                 -0.1, 1.0, -1.5, 0.1, 1.0, -1.5])
+    bridge.initialize_nominal_pose(nominal_motor_q)
+    print("DDS bridge ready; initialized policy nominal pose.")
 
     # Start go2_ctrl
     print(f"Starting go2_ctrl: {GO2_CTRL}")
@@ -409,10 +426,22 @@ def main():
     print("Warming up (publishing lowstate so go2_ctrl can connect)...")
     warmup_start = time.time()
     warmup_duration = 10.0  # go2_ctrl needs ~7s to load all ONNX policies
+    warmup_sim_start = d.time
+    last_state_publish = -float("inf")
     while time.time() - warmup_start < warmup_duration:
         with bridge.lock:
+            bridge.apply_nominal_hold(nominal_motor_q)
             mujoco.mj_step(m, d)
-        bridge.publish_state()
+        if d.time - last_state_publish >= STATE_PUBLISH_DT:
+            bridge.publish_state()
+            last_state_publish = d.time
+        # Pace warm-up too. An unpaced loop flooded DDS with tens of thousands
+        # of stale zero-joystick messages, so the controller saw the scenario
+        # one full run late and never made its intended transitions.
+        warmup_sim_elapsed = d.time - warmup_sim_start
+        warmup_wall_elapsed = time.time() - warmup_start
+        if warmup_sim_elapsed > warmup_wall_elapsed:
+            time.sleep(warmup_sim_elapsed - warmup_wall_elapsed)
         # Check if go2_ctrl died
         if ctrl_proc.poll() is not None:
             ctrl_log.close()
@@ -457,6 +486,7 @@ def main():
 
     sim_time = 0.0
     frame_count = 0
+    last_state_publish = d.time
 
     try:
         while sim_time < total_time + 1.0:
@@ -470,31 +500,18 @@ def main():
             if current_step:
                 label, keys, lx, ly, rx, ry, start_t = current_step
                 elapsed_in_step = sim_time - start_t
+                # Keep LT continuously asserted throughout the test. The
+                # controller's LT is a smoothed Axis, whereas every other
+                # transition control is edge-triggered. Dropping LT between
+                # scripted phases made queued zero-wireless packets erase LT
+                # before A/up's edge was evaluated.
+                joy.keys = make_keys("L2")
                 if keys:
-                    has_l2 = "L2" in keys
                     other_keys = [k for k in keys if k != "L2"]
-                    if has_l2:
-                        # LT is an Axis with smooth=0.03, threshold=0.5.
-                        # It takes ~23 ticks (23ms) to ramp from 0→0.5.
-                        # Strategy: press L2 alone first (0.05-0.10s),
-                        # then add the combo key so its on_pressed fires
-                        # while LT.pressed is already true.
-                        if 0.05 < elapsed_in_step < 0.10:
-                            # Phase A: L2 only (ramp the axis)
-                            joy.keys = make_keys("L2")
-                        elif 0.10 <= elapsed_in_step < 0.50:
-                            # Phase B: L2 + combo key
-                            joy.keys = make_keys(*keys)
-                        else:
-                            joy.keys = 0
-                    else:
-                        # No L2 — simple pulse
-                        if 0.05 < elapsed_in_step < 0.35:
-                            joy.keys = make_keys(*keys)
-                        else:
-                            joy.keys = 0
-                else:
-                    joy.keys = 0
+                    # Inject a short, single transition edge only after LT has
+                    # been asserted for long enough to cross its 0.5 threshold.
+                    if other_keys and 0.75 <= elapsed_in_step < 1.10:
+                        joy.keys = make_keys("L2", *other_keys)
                 # Set axes (only after key pulse settles)
                 if elapsed_in_step > 0.55:
                     joy.set_axes(lx, ly, rx, ry)
@@ -505,15 +522,25 @@ def main():
                 joy.set_axes(0, 0, 0, 0)
                 joy.keys = 0
 
-            # Physics step
+            # Keep the same nominal hold until FixStand has taken over.  Without
+            # it, the 10 s DDS/controller warm-up leaves Passive torque-free and
+            # the robot reaches the policy already collapsed/inverted.
             with bridge.lock:
+                if bridge.force_nominal_hold:
+                    bridge.apply_nominal_hold(nominal_motor_q)
+                # The LT+A transition has been held for four seconds by here;
+                # release command ownership only after FixStand is established.
+                if sim_time >= 4.5:
+                    bridge.force_nominal_hold = False
                 mujoco.mj_step(m, d)
 
-            # Publish DDS state at ~1kHz (every step)
-            bridge.publish_state()
+            # Publish state at 100 Hz, enough for the 1 kHz controller while
+            # preventing stale virtual-joystick samples from queuing in DDS.
+            if d.time - last_state_publish >= STATE_PUBLISH_DT:
+                bridge.publish_state()
+                last_state_publish = d.time
 
             sim_time = d.time - sim_time_offset
-
             # Render at video FPS
             if sim_time - last_render >= render_interval:
                 renderer.update_scene(d, cam)
