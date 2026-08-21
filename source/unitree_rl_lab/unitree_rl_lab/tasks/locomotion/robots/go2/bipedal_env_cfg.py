@@ -1613,7 +1613,7 @@ class BipedalRoughPhysicsCfg(PresetCfg):
             joint_limit_solver_type="sparse_jacobi",
             contact_solver_type="sparse_jacobi",
             contact_max_iterations=60,
-            contact_omega=0.1,
+            contact_omega=0.07,
             contact_reg=1.0e-3,
             contact_compliance=1.0e-6,
             contact_alpha=0.0,
@@ -1627,9 +1627,7 @@ class BipedalRoughPhysicsCfg(PresetCfg):
         debug_mode=False,
         use_cuda_graph=True,
         collapse_fixed_joints=True,
-        # Match the validated four-legged velocity-rough DVI contact shape settings.
-        # Leave margin at its Newton default (0.0) and use an explicit 5 mm gap.
-        default_shape_cfg=NewtonShapeCfg(gap=0.005),
+        default_shape_cfg=NewtonShapeCfg(margin=0.005, gap=0.01),
         collision_cfg=NewtonCollisionPipelineCfg(
             rigid_contact_max=665536,
             max_triangle_pairs=2_500_000,
