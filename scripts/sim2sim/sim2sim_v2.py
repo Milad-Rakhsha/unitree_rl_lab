@@ -72,11 +72,21 @@ def get_mappings(ordering):
     return IQPOS_PHYSX, IQVEL_PHYSX, IACT_PHYSX, DPOS_PHYSX, KPF_PHYSX, KDF_PHYSX
 
 def clip_torque(tau, vel):
+    """Apply the Unitree GO2HV torque-speed limit."""
     sd = (vel * tau) > 0; me = np.where(sd, Y1, Y2)
     av = np.abs(vel); ab = av > X1
     k = -me / (X2 - X1); lim = k * (av - X1) + me; lim = np.maximum(lim, 0.0)
     me = np.where(ab, lim, me)
-    return np.clip(tau - 0.01 * vel, -me, me)
+    return np.clip(tau, -me, me)
+
+
+def apply_dvi_go2hv_passive_torque(tau, vel):
+    """Match UnitreeActuatorCfg_Go2HV after its torque-speed limit.
+
+    UnitreeActuator.compute() subtracts this smooth passive torque from its
+    already-limited applied effort: Fs*tanh(qd/Va) + Fd*qd.
+    """
+    return tau - 0.2 * np.tanh(vel / 0.01) - 0.1 * vel
 
 def qri(q, v):
     w, x, y, z = q; u = np.array([x, y, z]); t = 2.0 * np.cross(u, v)
