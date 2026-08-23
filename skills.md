@@ -4,6 +4,8 @@ Validated, repository-local workflows. `skills.md` is the canonical index; `SKIL
 
 ## Common requirements
 
+> **Figure encoding rule:** exhaust distinct meaningful colors before using line style as a second discriminator. Use color for the primary comparison identity; add solid/dashed/dotted styles only when colors are exhausted, curves overlap, or a secondary factor must be encoded. State the encoding in the legend.
+
 - Run commands from the repository root.
 - Use the checkpoint's matching `params/deploy.yaml`; native DVI replay also requires its saved `params/bipedal_env_cfg.py`.
 - Store canonical outputs under `policy_videos/` or the originating run. Workspace artifacts are delivery copies only.
