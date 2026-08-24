@@ -1168,6 +1168,8 @@ class RewardsCfg:
     #                                 on ground, tiny steps)
     #   rear_feet_flight   (-0.75) → blocks PRONKING (both feet airborne
     #                                 simultaneously, hopping forward)
+    #   rear_feet_airborne_at_standstill (-0.2) → blocks in-place marching
+    #                                 at a true zero command
     #   rear_feet_clearance (+0.5) → blocks DRAGGING (swing foot scrapes
     #                                 along the ground without lifting)
     #   rear_feet_slide    (-0.25) → blocks SLIDING (stance foot moves
@@ -1213,6 +1215,24 @@ class RewardsCfg:
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names="R[LR]_foot"),
         },
     )
+    # ---- rear_feet_airborne_at_standstill (w=-0.2) ----
+    # WHAT: At a near-zero full velocity command, returns the fraction of
+    # rear feet that are airborne: 0.0 for double stance, 0.5 for one lifted
+    # foot, and 1.0 for both feet lifted.
+    # WHY: The active-walking gait terms are intentionally gated off at rest,
+    # so they cannot discourage learned in-place marching. This negative term
+    # supplies that missing standstill-specific incentive without penalizing
+    # commanded forward, lateral, or yaw motion.
+    rear_feet_airborne_at_standstill = RewTerm(
+        func=bipedal_mdp.rear_feet_airborne_at_standstill,
+        weight=-0.2,
+        params={
+            "command_name": "base_velocity",
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names="R[LR]_foot"),
+            "min_command_magnitude": 0.1,
+        },
+    )
+
     # ---- rear_feet_flight (w=-0.75) ----
     # WHAT: Both-feet-airborne (pronk/flight) penalty. Returns 1.0 per
     #   step when BOTH rear feet are simultaneously off the ground and
@@ -1607,27 +1627,28 @@ class BipedalRoughPhysicsCfg(PresetCfg):
     newton_dvi: NewtonCfg = NewtonCfg(
         solver_cfg=DVISolverCfg(
             joint_solver_type="sparse_ldl",
-            joint_alpha=0.0,
+            joint_alpha=0.0025,
             joint_recovery_speed=100000.0,
             joint_iterative_refinement_steps=1,
             joint_limit_solver_type="sparse_jacobi",
             contact_solver_type="sparse_jacobi",
-            contact_max_iterations=60,
-            contact_omega=0.07,
-            contact_reg=1.0e-3,
-            contact_compliance=1.0e-6,
-            contact_alpha=0.0,
-            contact_recovery_speed=10.0,
-            coupling_iterations=1,
+            contact_max_iterations=20,
+            contact_omega=0.1,
+            contact_friction_projection="cone",
+            contact_reg=1.0e-4,
+            contact_compliance=1e-7,
+            contact_alpha=0.0025,
+            contact_recovery_speed=2.0,
+            coupling_iterations=2,
             post_stabilize_joints=False,
-            angular_damping=0.0,
+            angular_damping=0.01,
             actuator_integration="explicit",
         ),
         num_substeps=2,
         debug_mode=False,
         use_cuda_graph=True,
         collapse_fixed_joints=True,
-        default_shape_cfg=NewtonShapeCfg(margin=0.005, gap=0.01),
+        default_shape_cfg=NewtonShapeCfg(margin=0.0, gap=0.005),
         collision_cfg=NewtonCollisionPipelineCfg(
             rigid_contact_max=665536,
             max_triangle_pairs=2_500_000,
@@ -1682,7 +1703,12 @@ class RobotBipedalWalkEnvCfg(ManagerBasedRLEnvCfg):
         # because fixed-joint collapse puts foot shapes on calf bodies.
         rear_sensor_cfgs = [
             getattr(self.rewards, name).params["sensor_cfg"]
-            for name in ("rear_feet_air_time", "rear_feet_flight", "rear_feet_slide")
+            for name in (
+                "rear_feet_air_time",
+                "rear_feet_airborne_at_standstill",
+                "rear_feet_flight",
+                "rear_feet_slide",
+            )
         ]
         for sensor_cfg in rear_sensor_cfgs:
             sensor_cfg.name = preset(

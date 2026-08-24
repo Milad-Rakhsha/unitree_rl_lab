@@ -262,6 +262,30 @@ def feet_clearance_reward(
     return reward * active
 
 
+def rear_feet_airborne_at_standstill(
+    env: "ManagerBasedRLEnv",
+    sensor_cfg: SceneEntityCfg,
+    command_name: str,
+    min_command_magnitude: float = 0.1,
+) -> torch.Tensor:
+    """Return the airborne fraction of selected rear feet at near-zero command.
+
+    The value is zero whenever the full velocity-command vector has norm at
+    least ``min_command_magnitude``.  At standstill, one lifted rear foot
+    returns ``0.5`` and two lifted feet return ``1.0``.  Use a negative
+    reward weight to explicitly discourage in-place marching without
+    changing the active-walking gait rewards.  The full command vector is
+    intentional: commanded yaw is active movement and must not be penalized
+    as standing still.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contact_time = _tt(contact_sensor.data.current_contact_time)[:, sensor_cfg.body_ids]
+    airborne_fraction = (contact_time <= 0.0).float().mean(dim=1)
+    command = env.command_manager.get_command(command_name)
+    standing = torch.linalg.norm(command, dim=1) < min_command_magnitude
+    return airborne_fraction * standing.float()
+
+
 def feet_both_airborne(
     env: "ManagerBasedRLEnv",
     sensor_cfg: SceneEntityCfg,
