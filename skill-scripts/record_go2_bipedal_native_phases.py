@@ -247,13 +247,6 @@ def main() -> None:
                 frame = np.asarray(frame)
                 if frame.shape[-1] == 4:
                     frame = frame[..., :3]
-                if args.telemetry:
-                    forces = rear_sensor.data.net_forces_w
-                    forces = forces.torch if hasattr(forces, "torch") else forces
-                    forces = forces[0].detach().cpu().numpy()
-                    telemetry_time.append(step * env.unwrapped.step_dt)
-                    telemetry_joint_pos.append(robot_data.joint_pos[0, rear_joint_indices].detach().cpu().numpy().copy())
-                    telemetry_contact.append((np.linalg.norm(forces, axis=-1) > 1.0).astype(np.uint8))
                 if args.phased_commands:
                     phase_name, command = phases[phase_index]
                     image = Image.fromarray(frame.astype(np.uint8, copy=False)).convert("RGB")
@@ -264,6 +257,13 @@ def main() -> None:
                     frame = np.asarray(image)
                 writer.append_data(frame)
                 frames.append(frame)
+            if args.telemetry:
+                forces = rear_sensor.data.net_forces_w
+                forces = forces.torch if hasattr(forces, "torch") else forces
+                forces = forces[0].detach().cpu().numpy()
+                telemetry_time.append(step * env.unwrapped.step_dt)
+                telemetry_joint_pos.append(robot_data.joint_pos[0, rear_joint_indices].detach().cpu().numpy().copy())
+                telemetry_contact.append((np.linalg.norm(forces, axis=-1) > 1.0).astype(np.uint8))
     finally:
         writer.close()
         env.close()
