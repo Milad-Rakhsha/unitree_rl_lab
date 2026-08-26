@@ -4,7 +4,9 @@ Validated, repository-local workflows. `skills.md` is the canonical index; `SKIL
 
 ## Common requirements
 
-> **Figure encoding rule:** exhaust distinct meaningful colors before using line style as a second discriminator. Use color for the primary comparison identity; add solid/dashed/dotted styles only when colors are exhausted, curves overlap, or a secondary factor must be encoded. State the encoding in the legend.
+> **Figure encoding rule:** exhaust distinct meaningful colors before using line style as a second discriminator. Use color for the primary comparison identity; add solid/dashed/dotted styles only when colors are exhausted, curves overlap, or a secondary factor must be encoded. State the encoding in the legend. When assigning distinct series colors, use this preference order where feasible: **blue, red, black, green, purple, magenta, yellow**, then additional clearly distinguishable colors. Preserve solver identity colors when an established publication palette applies.
+
+> **Reward-breakdown layout rule:** order `Episode_Reward/*` panels by configured numerical weight from highest to lowest, using the immutable run's saved `params/bipedal_env_cfg.py` as the source of truth; do not use alphabetical tag order. Group equal-weight terms only when a panel contains at most two terms; split larger groups into separate panels. Print each weight in its panel title, record the exact panel/term/weight order in the figure summary, and give every subplot its own compact in-axes legend. Never use a figure-level legend or let a legend overlap another subplot; within a panel, colour encodes run and line style encodes term. For behavioral claims (for example bilateral thigh parallelism), distinguish direct reward terms from indirect correlates; reward curves alone do not establish causality.
 
 - Run commands from the repository root.
 - Use the checkpoint's matching `params/deploy.yaml`; native DVI replay also requires its saved `params/bipedal_env_cfg.py`.
@@ -105,6 +107,12 @@ python skill-scripts/plot_bipedal_rough_reward_terms.py \
   --old-dvi-run /path/to/old_dvi --recent-dvi-run /path/to/recent_dvi \
   --mjwarp-run /path/to/mjwarp --output-dir /path/to/figures
 ```
+
+
+For current-DVI-versus-MJWarp plots, use `plot_dvi_vs_mjwarp_current.py` with
+`--reward-config "$RUN/params/bipedal_env_cfg.py"`. It extracts literal `RewTerm`
+weights from that immutable config, orders panels by descending absolute weight,
+and records the term/weight order in `comparison_summary.txt`.
 
 ## Validation checklist
 
