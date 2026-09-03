@@ -27,6 +27,9 @@ parser.add_argument("--fps", type=int, default=50)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--num-envs", type=int, default=1, help="Number of simultaneous environments to render.")
 parser.add_argument("--focus-left", action="store_true", help="Zoom and focus on the left side of a multi-environment grid.")
+parser.add_argument("--camera-eye", type=float, nargs=3, metavar=("X", "Y", "Z"), help="Explicit fixed-world camera eye; overrides automatic framing.")
+parser.add_argument("--camera-lookat", type=float, nargs=3, metavar=("X", "Y", "Z"), help="Explicit fixed-world camera target; overrides automatic framing.")
+parser.add_argument("--camera-fov", type=float, default=35.0, help="Camera vertical field of view in degrees.")
 parser.add_argument("--preset", choices=("newton_dvi", "newton_mjwarp"), default="newton_dvi")
 parser.add_argument("--joint-limit-iterations", type=int)
 parser.add_argument("--coupling-iterations", type=int)
@@ -37,6 +40,7 @@ parser.add_argument("--contact-alpha", type=float)
 parser.add_argument("--joint-alpha", type=float)
 parser.add_argument("--joint-recovery-speed", type=float)
 parser.add_argument("--zero-command", action="store_true", help="Force zero velocity commands.")
+parser.add_argument("--single-command", action="store_true", help="Hold [--cmd-vx, --cmd-vy, --cmd-wz] throughout the recording.")
 parser.add_argument("--flat-terrain", action="store_true", help="Evaluate the rough-trained policy on Isaac Lab's infinite flat plane.")
 parser.add_argument("--follow-robot", action="store_true", help="Track environment 0's robot with a fixed-offset camera.")
 parser.add_argument("--front-view", action="store_true", help="Use the opposite fixed-world tracking offset, matching the MuJoCo recorder's front-facing view.")
@@ -143,6 +147,11 @@ def main() -> None:
             center_x, center_y = 0.5 * extent_x, 0.5 * extent_y
             eye = (center_x + 0.90 * span, -0.90 * span, 0.78 * span)
             lookat = (center_x, center_y, 0.45)
+    if (args.camera_eye is None) != (args.camera_lookat is None):
+        raise ValueError("--camera-eye and --camera-lookat must be supplied together")
+    if args.camera_eye is not None:
+        eye = tuple(args.camera_eye)
+        lookat = tuple(args.camera_lookat)
     cfg.sim.visualizer_cfgs = [
         NewtonVisualizerCfg(
             headless=True,
@@ -171,14 +180,14 @@ def main() -> None:
     viewer = visualizer._viewer
 
     # Camera is updated per frame below when --follow-robot is enabled.
-    viewer.camera.fov = 35.0
+    viewer.camera.fov = args.camera_fov
 
     obs = env.get_observations()
     if isinstance(obs, tuple):
         obs = obs[0]
 
-    if args.zero_command and args.phased_commands:
-        raise ValueError("--zero-command and --phased-commands are mutually exclusive")
+    if sum((args.zero_command, args.single_command, args.phased_commands)) > 1:
+        raise ValueError("--zero-command, --single-command, and --phased-commands are mutually exclusive")
     cmd_mgr = env.unwrapped.command_manager
     phases = [
         ("forward x", (args.cmd_vx, 0.0, 0.0)),
@@ -196,6 +205,8 @@ def main() -> None:
 
     if args.zero_command:
         force_command((0.0, 0.0, 0.0))
+    elif args.single_command:
+        force_command((args.cmd_vx, args.cmd_vy, args.cmd_wz))
     elif args.phased_commands:
         force_command(phases[0][1])
 
@@ -228,6 +239,8 @@ def main() -> None:
             phase_index = min(step // phase_steps, len(phases) - 1)
             if args.zero_command:
                 force_command((0.0, 0.0, 0.0))
+            elif args.single_command:
+                force_command((args.cmd_vx, args.cmd_vy, args.cmd_wz))
             elif args.phased_commands:
                 force_command(phases[phase_index][1])
             if step % frame_stride == 0:

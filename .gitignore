@@ -4,6 +4,7 @@
 **/*.so
 **/*.log*
 
+**/policy_videos/**
 # Omniverse
 **/*.dmp
 **/.thumbs

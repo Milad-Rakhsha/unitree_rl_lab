@@ -40,6 +40,7 @@ def main():
     parser.add_argument("--cmd-wz", type=float, default=0.7)
     parser.add_argument("--phase-duration", type=float, default=2.5)
     parser.add_argument("--zero-command", action="store_true", help="Hold [0, 0, 0] for the full recording instead of command phases.")
+    parser.add_argument("--single-command", action="store_true", help="Hold [--cmd-vx, --cmd-vy, --cmd-wz] for the full recording instead of command phases.")
     parser.add_argument("--pd-gains", choices=("deployment", "native-nominal"), default="deployment",
                         help="Use checkpoint deploy.yaml gains (default) or native Isaac Lab nominal Kp=25, Kd=0.5.")
     parser.add_argument("--settle-duration", type=float, default=0.8,
@@ -100,9 +101,13 @@ def main():
     if (actor_obs_dim - 15) % 30:
         raise ValueError(f"Unsupported actor obs dimension {actor_obs_dim}")
     hist = (actor_obs_dim - 15) // 30
+    if args.zero_command and args.single_command:
+        raise ValueError("--zero-command and --single-command are mutually exclusive")
     phases = ([
         ("zero command", np.array([0.0, 0.0, 0.0])),
     ] if args.zero_command else [
+        ("single command", np.array([args.cmd_vx, args.cmd_vy, args.cmd_wz])),
+    ] if args.single_command else [
         ("forward x", np.array([args.cmd_vx, 0.0, 0.0])),
         ("lateral y", np.array([0.0, args.cmd_vy, 0.0])),
         ("yaw", np.array([0.0, 0.0, args.cmd_wz])),
@@ -144,7 +149,7 @@ def main():
     track_body_id = model.body("base_link").id
     font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
     small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 16)
-    phase_steps = (round(args.phase_duration / 0.02) if not args.zero_command else round(10.0 / 0.02))
+    phase_steps = (round(args.phase_duration / 0.02) if not (args.zero_command or args.single_command) else round(10.0 / 0.02))
     phase_start = None
     phase_velocity_samples = []
     try:
@@ -209,7 +214,8 @@ def main():
                 if not args.hide_overlay:
                     draw = ImageDraw.Draw(frame)
                     draw.rectangle((0, 0, frame.width, 57), fill=(15, 15, 15))
-                    draw.text((12, 7), ("Zero command" if args.zero_command else f"Phase {phase_idx + 1}/4: {phase_name}"), font=font, fill="white")
+                    label = "Zero command" if args.zero_command else ("Single command" if args.single_command else f"Phase {phase_idx + 1}/4: {phase_name}")
+                    draw.text((12, 7), label, font=font, fill="white")
                     draw.text((12, 32), f"cmd = [{cmd[0]:.1f}, {cmd[1]:.1f}, {cmd[2]:.1f}]  |  t = {step*.02:.1f}s", font=small, fill=(225, 225, 225))
                 writer.append_data(np.asarray(frame))
             if data.qpos[2] < 0.15:

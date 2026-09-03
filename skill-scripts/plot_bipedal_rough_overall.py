@@ -15,6 +15,7 @@ COLORS = {"Old DVI": "#FF1700", "Recent DVI": "#0000FF", "MJWarp": "#168A2E"}
 ORDER = ("Recent DVI", "Old DVI", "MJWarp")
 ALPHA = 2.0 / 36.0
 WINDOW = 35
+MAX_RAW_STEP: int | None = None
 
 
 def parse_args():
@@ -24,6 +25,7 @@ def parse_args():
     parser.add_argument("--mjwarp-run", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--output-stem", default="go2_bipedal_rough_overall_reward")
+    parser.add_argument("--max-raw-step", type=int, help="Exclude scalar points after this TensorBoard iteration.")
     return parser.parse_args()
 
 
@@ -38,7 +40,16 @@ def load(path: Path):
 
 def series(acc, tag):
     pts = acc.Scalars(tag)
+    if MAX_RAW_STEP is not None:
+        pts = [p for p in pts if p.step <= MAX_RAW_STEP]
+    if not pts:
+        raise RuntimeError(f"No {tag} points at or before max raw step {MAX_RAW_STEP}")
     return np.asarray([p.step for p in pts]), np.asarray([p.value for p in pts], dtype=float)
+
+
+def relative_iterations(x):
+    """Align each run at zero, including resumed runs whose TensorBoard steps inherit a checkpoint offset."""
+    return x - x[0]
 
 
 def ema(y):
@@ -55,7 +66,9 @@ def rolling_std(y):
 
 
 def main():
+    global MAX_RAW_STEP
     args = parse_args()
+    MAX_RAW_STEP = args.max_raw_step
     runs = {"Old DVI": args.old_dvi_run, "Recent DVI": args.recent_dvi_run, "MJWarp": args.mjwarp_run}
     for name, path in runs.items():
         if not path.is_dir():
@@ -63,7 +76,11 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     accs = {name: load(path) for name, path in runs.items()}
-    rewards = {name: series(acc, "Train/mean_reward") for name, acc in accs.items()}
+    rewards = {
+        name: (relative_iterations(x), y)
+        for name, acc in accs.items()
+        for x, y in [series(acc, "Train/mean_reward")]
+    }
     fps = {}
     for name, acc in accs.items():
         x, y = series(acc, "Perf/total_fps")
@@ -79,7 +96,7 @@ def main():
         smooth, spread = ema(y), rolling_std(y)
         ax.fill_between(x, smooth-spread, smooth+spread, color=COLORS[name], alpha=0.13, linewidth=0)
         ax.plot(x, smooth, color=COLORS[name], linewidth=1.65, label=f"{name} — {fps[name]:,.0f} steps/s")
-    ax.set(title="Go2", xlabel="PPO iteration", ylabel="Mean episode reward",
+    ax.set(title="Go2", xlabel="PPO iterations since run start", ylabel="Mean episode reward",
            xlim=(0, max(int(x[-1]) for x, _ in rewards.values())))
     ax.grid(True, color="#999999", alpha=0.30, linewidth=0.6)
     ax.legend(loc="lower right", frameon=True, facecolor="white", framealpha=0.94, edgecolor="none")
@@ -89,7 +106,7 @@ def main():
 
     for name in ORDER:
         x, y = rewards[name]
-        print(f"{name}: iteration={int(x[-1])} raw={y[-1]:.3f} ema={ema(y)[-1]:.3f} fps={fps[name]:.0f}")
+        print(f"{name}: relative_iteration={int(x[-1])} raw={y[-1]:.3f} ema={ema(y)[-1]:.3f} fps={fps[name]:.0f}")
     print(stem.with_suffix(".png"))
 
 

@@ -15,6 +15,7 @@ COLORS = {"Old DVI": "#FF1700", "Recent DVI": "#0000FF", "MJWarp": "#168A2E"}
 PLOT_ORDER = ("Recent DVI", "Old DVI", "MJWarp")
 ALPHA = 2.0 / 36.0
 WINDOW = 35
+MAX_RAW_STEP: int | None = None
 
 
 def parse_args():
@@ -24,6 +25,7 @@ def parse_args():
     parser.add_argument("--mjwarp-run", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--output-stem", default="go2_bipedal_rough_reward_terms")
+    parser.add_argument("--max-raw-step", type=int, help="Exclude scalar points after this TensorBoard iteration.")
     return parser.parse_args()
 
 
@@ -38,7 +40,16 @@ def load(run: Path):
 
 def series(acc, tag):
     pts = acc.Scalars(tag)
+    if MAX_RAW_STEP is not None:
+        pts = [p for p in pts if p.step <= MAX_RAW_STEP]
+    if not pts:
+        raise RuntimeError(f"No {tag} points at or before max raw step {MAX_RAW_STEP}")
     return np.asarray([p.step for p in pts]), np.asarray([p.value for p in pts], dtype=float)
+
+
+def relative_iterations(x):
+    """Align each run at zero, including resumed runs whose TensorBoard steps inherit a checkpoint offset."""
+    return x - x[0]
 
 
 def ema(y):
@@ -55,7 +66,9 @@ def rolling_std(y):
 
 
 def main():
+    global MAX_RAW_STEP
     args = parse_args()
+    MAX_RAW_STEP = args.max_raw_step
     runs = {"Old DVI": args.old_dvi_run, "Recent DVI": args.recent_dvi_run, "MJWarp": args.mjwarp_run}
     for name, path in runs.items():
         if not path.is_dir():
@@ -78,7 +91,8 @@ def main():
     for index, (ax, term) in enumerate(zip(axes.flat, common)):
         traces = {}
         for name in PLOT_ORDER:
-            x, y = series(accs[name], f"Episode_Reward/{term}")
+            raw_x, y = series(accs[name], f"Episode_Reward/{term}")
+            x = relative_iterations(raw_x)
             smooth, spread = ema(y), rolling_std(y)
             traces[name] = smooth
             ax.fill_between(x, smooth-spread, smooth+spread, color=COLORS[name], alpha=0.09, linewidth=0)
@@ -87,7 +101,7 @@ def main():
         dvi_lo = min(traces["Old DVI"].min(), traces["Recent DVI"].min())
         dvi_hi = max(traces["Old DVI"].max(), traces["Recent DVI"].max())
         pad = 0.05 * (dvi_hi - dvi_lo) if dvi_hi > dvi_lo else max(abs(dvi_lo) * 0.05, 1.0e-6)
-        ax.set(title=term.replace("_", " "), xlim=(0, max(series(accs[name], f"Episode_Reward/{term}")[0][-1] for name in PLOT_ORDER)),
+        ax.set(title=term.replace("_", " "), xlim=(0, max(relative_iterations(series(accs[name], f"Episode_Reward/{term}")[0])[-1] for name in PLOT_ORDER)),
                ylim=(dvi_lo - pad, dvi_hi + pad))
         ax.grid(True, color="#999999", alpha=0.28, lw=0.5)
         ax.tick_params(labelsize=7.8)
@@ -95,7 +109,7 @@ def main():
         ax.set_visible(False)
     fig.suptitle("Go2", fontsize=13)
     fig.legend(loc="upper center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 0.968))
-    fig.supxlabel("PPO iteration", fontsize=10)
+    fig.supxlabel("PPO iterations since run start", fontsize=10)
     fig.supylabel("Episode reward term", fontsize=10)
     stem = args.output_dir / args.output_stem
     for ext, kwargs in (("png", {"dpi": 600}), ("pdf", {}), ("svg", {})):

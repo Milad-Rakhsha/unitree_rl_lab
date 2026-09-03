@@ -13,9 +13,12 @@ def main():
     parser.add_argument("--mjwarp", required=True, help="MJWarp phased MP4")
     parser.add_argument("--dvi", required=True, help="DVI phased MP4")
     parser.add_argument("--output", required=True)
+    parser.add_argument("--subtitle", default="x → y → yaw → combined", help="Header text for the paired replay.")
+    parser.add_argument("--left-label", default="MJWarp", help="Left-panel label.")
+    parser.add_argument("--right-label", default="DVI", help="Right-panel label.")
     args = parser.parse_args()
 
-    inputs = [(Path(args.mjwarp), "MJWarp", (64, 180, 80)), (Path(args.dvi), "DVI", (220, 65, 55))]
+    inputs = [(Path(args.mjwarp), args.left_label, (0, 114, 189)), (Path(args.dvi), args.right_label, (214, 39, 40))]
     for path, *_ in inputs:
         if not path.is_file():
             raise FileNotFoundError(path)
@@ -36,7 +39,7 @@ def main():
                 draw = ImageDraw.Draw(panel)
                 draw.rectangle((0, 0, image.width, 7), fill=color)
                 draw.text((12, 12), name, font=font, fill="white")
-                draw.text((410, 17), "x → y → yaw → combined", font=small, fill=(220, 220, 220))
+                draw.text((410, 17), args.subtitle, font=small, fill=(220, 220, 220))
                 panels.append(np.asarray(panel))
             divider = np.full((panels[0].shape[0], 8, 3), 18, dtype=np.uint8)
             writer.append_data(np.concatenate([panels[0], divider, panels[1]], axis=1))

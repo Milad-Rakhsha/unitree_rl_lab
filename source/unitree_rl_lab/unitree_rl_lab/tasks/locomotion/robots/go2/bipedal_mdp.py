@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor
-from isaaclab.utils.math import normalize, quat_apply_inverse
+from isaaclab.utils.math import normalize, quat_apply, quat_apply_inverse
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -216,6 +216,37 @@ def ang_vel_xy_world_l2(
     return torch.sum(torch.square(_tt(asset.data.root_ang_vel_w)[:, :2]), dim=1)
 
 
+def _foot_point_kinematics(
+    env: "ManagerBasedRLEnv",
+    asset_cfg: SceneEntityCfg,
+    kinematics_sensor_names: list[str] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return world-frame position and velocity of the original foot origins.
+
+    Without fixed-joint collapse, the original MJWarp MDP reads the foot rigid
+    bodies directly. Under DVI collapse those bodies no longer exist, so one
+    PVA site is placed at each former foot origin on its parent calf. PVA
+    accounts for the rigid-body transport term ``omega x r``; rotating its
+    body-frame velocity back to world gives the same kinematic quantity that
+    ``body_lin_vel_w`` exposed before collapse.
+    """
+    if not kinematics_sensor_names:
+        asset: RigidObject = env.scene[asset_cfg.name]
+        return (
+            _tt(asset.data.body_pos_w)[:, asset_cfg.body_ids, :],
+            _tt(asset.data.body_lin_vel_w)[:, asset_cfg.body_ids, :],
+        )
+
+    positions = []
+    velocities = []
+    for sensor_name in kinematics_sensor_names:
+        sensor = env.scene.sensors[sensor_name]
+        quat_w = sensor.data.quat_w.torch
+        positions.append(sensor.data.pos_w.torch)
+        velocities.append(quat_apply(quat_w, sensor.data.lin_vel_b.torch))
+    return torch.stack(positions, dim=1), torch.stack(velocities, dim=1)
+
+
 def feet_clearance_reward(
     env: "ManagerBasedRLEnv",
     asset_cfg: SceneEntityCfg,
@@ -224,6 +255,7 @@ def feet_clearance_reward(
     tanh_mult: float,
     command_name: str,
     min_command_magnitude: float = 0.1,
+    kinematics_sensor_names: list[str] | None = None,
 ) -> torch.Tensor:
     """Reward swinging feet for clearing a target height off the ground.
 
@@ -245,21 +277,38 @@ def feet_clearance_reward(
     Ported from ``spot/mdp/rewards.py::foot_clearance_reward`` with the
     addition of a command gate. Use with a small positive weight.
     """
-    asset: RigidObject = env.scene[asset_cfg.name]
-    foot_z_target_error = torch.square(
-        _tt(asset.data.body_pos_w)[:, asset_cfg.body_ids, 2] - target_height
+    foot_pos_w, foot_lin_vel_w = _foot_point_kinematics(
+        env, asset_cfg, kinematics_sensor_names
     )
+    foot_z_target_error = torch.square(foot_pos_w[:, :, 2] - target_height)
     foot_velocity_tanh = torch.tanh(
-        tanh_mult
-        * torch.linalg.norm(
-            _tt(asset.data.body_lin_vel_w)[:, asset_cfg.body_ids, :2], dim=2
-        )
+        tanh_mult * torch.linalg.norm(foot_lin_vel_w[:, :, :2], dim=2)
     )
     weighted = foot_z_target_error * foot_velocity_tanh
     reward = torch.exp(-torch.sum(weighted, dim=1) / std)
     command = env.command_manager.get_command(command_name)[:, :2]
     active = (torch.linalg.norm(command, dim=1) > min_command_magnitude).float()
     return reward * active
+
+
+def feet_slide_reward(
+    env: "ManagerBasedRLEnv",
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    kinematics_sensor_names: list[str] | None = None,
+) -> torch.Tensor:
+    """Original foot-slide penalty using collapse-safe foot-origin velocity."""
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = (
+        _tt(contact_sensor.data.net_forces_w_history)[:, :, sensor_cfg.body_ids, :]
+        .norm(dim=-1)
+        .max(dim=1)[0]
+        > 1.0
+    )
+    _, foot_lin_vel_w = _foot_point_kinematics(
+        env, asset_cfg, kinematics_sensor_names
+    )
+    return torch.sum(foot_lin_vel_w[:, :, :2].norm(dim=-1) * contacts, dim=1)
 
 
 def rear_feet_airborne_at_standstill(
