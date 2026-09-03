@@ -12,8 +12,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-# Preferred comparison-color order: blue, then red (skills.md).
-COLORS = {"DVI": "#0072BD", "MJWarp": "#D62728"}
+# Publication palette: DVI/Jacobi blue, MJWarp green.
+COLORS = {"DVI": "#0072BD", "MJWarp": "#168A2E"}
 ALPHA = 2.0 / 36.0
 WINDOW = 35
 
@@ -62,11 +62,11 @@ def spread(y):
     return np.asarray([np.std(y[max(0, i - h):min(len(y), i + h + 1)]) for i in range(len(y))])
 
 
-def plot_trace(ax, data, title, ylabel):
+def plot_trace(ax, data, title, ylabel, fps):
     for name, (x, y) in data.items():
         sm, sd = ema(y), spread(y)
         ax.fill_between(x, sm - sd, sm + sd, color=COLORS[name], alpha=.13, linewidth=0)
-        ax.plot(x, sm, color=COLORS[name], lw=1.6, label=name)
+        ax.plot(x, sm, color=COLORS[name], lw=1.6, label=f"{name} — {fps[name]:,.0f} steps/s")
     ax.set(title=title, ylabel=ylabel)
     ax.grid(True, alpha=.28)
 
@@ -108,8 +108,12 @@ def main():
                          "mathtext.fontset": "stix", "font.size": 10})
 
     rewards = {name: series(acc, "Train/mean_reward", cutoff)[:2] for name, (acc, cutoff) in runs.items()}
+    fps = {}
+    for name, (acc, cutoff) in runs.items():
+        x, y, raw = series(acc, "Perf/total_fps", cutoff)
+        fps[name] = float(np.median(y[raw >= max(raw[0] + 100, int(0.1 * raw[-1]))]))
     fig, ax = plt.subplots(figsize=(7.5, 4.7), constrained_layout=True)
-    plot_trace(ax, rewards, "Go2", "Mean episode reward")
+    plot_trace(ax, rewards, "Go2", "Mean episode reward", fps)
     ax.set_xlabel("PPO iterations since run start")
     ax.set_xlim(0, max(x[-1] for x, _ in rewards.values()))
     ax.legend(loc="lower right", frameon=True)
@@ -154,7 +158,8 @@ def main():
         ax.tick_params(labelsize=7.2)
         # Every subplot owns its compact legend: colour = policy and, when
         # applicable, line style = reward term. No figure-level legend.
-        handles = [plt.Line2D([], [], color=COLORS[name], lw=1.5, label=name) for name in runs]
+        handles = [plt.Line2D([], [], color=COLORS[name], lw=1.5,
+                              label=f"{name} — {fps[name]:,.0f} steps/s") for name in runs]
         if len(terms) > 1:
             handles.extend(plt.Line2D([], [], color="#333333", ls=styles[i], lw=1.25,
                                       label=term.replace("_", " "))
@@ -163,7 +168,7 @@ def main():
                   framealpha=.92, edgecolor="none", ncol=2)
     for ax in axes[len(ordered_groups):]:
         ax.set_visible(False)
-    fig.suptitle("Go2 — reward terms grouped by configured weight (highest to lowest)", fontsize=13)
+    fig.suptitle("Go2", fontsize=13)
     fig.supxlabel("PPO iterations since run start")
     save(fig, a.output_dir, "individual_reward_terms")
 
@@ -180,13 +185,15 @@ def main():
     for ax, (tag, label) in zip(axes.flat, tags):
         if all(tag in acc.Tags()["scalars"] for acc, _ in runs.values()):
             data = {name: series(acc, tag, cutoff)[:2] for name, (acc, cutoff) in runs.items()}
-            plot_trace(ax, data, tag.removeprefix("Metrics/").removeprefix("Episode_Termination/").replace("_", " "), label)
+            plot_trace(ax, data, tag.removeprefix("Metrics/").removeprefix("Episode_Termination/").replace("_", " "), label, fps)
             ax.set_xlim(0, max(x[-1] for x, _ in data.values()))
             valid.append(tag)
         else:
             ax.set_visible(False)
-    fig.suptitle("Go2 — command tracking and failure metrics", fontsize=13)
-    fig.legend([plt.Line2D([], [], color=COLORS[n]) for n in runs], list(runs), loc="upper center", ncol=2, frameon=False)
+    fig.suptitle("Go2", fontsize=13)
+    fig.legend([plt.Line2D([], [], color=COLORS[n]) for n in runs],
+               [f"{n} — {fps[n]:,.0f} steps/s" for n in runs],
+               loc="upper center", ncol=2, frameon=False)
     fig.supxlabel("PPO iterations since run start")
     save(fig, a.output_dir, "diagnostic_metrics")
 

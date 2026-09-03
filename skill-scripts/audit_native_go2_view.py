@@ -22,7 +22,6 @@ parser.add_argument("--task", type=str, default="Unitree-Go2-Bipedal-Walk")
 parser.add_argument("--saved-env-cfg", type=pathlib.Path, help="Saved bipedal_env_cfg.py from the run; restores its native solver configuration.")
 parser.add_argument("--output", type=pathlib.Path, required=True)
 parser.add_argument("--telemetry", type=pathlib.Path, help="Optional NPZ output with policy inputs/actions, full robot state, actuator effort, feet, and contacts.")
-parser.add_argument("--no-video", action="store_true", help="Skip frame rendering and video encoding for diagnostic sweeps.")
 parser.add_argument("--steps", type=int, default=400)
 parser.add_argument("--fps", type=int, default=50)
 parser.add_argument("--seed", type=int, default=42)
@@ -33,18 +32,6 @@ parser.add_argument("--camera-lookat", type=float, nargs=3, metavar=("X", "Y", "
 parser.add_argument("--camera-fov", type=float, default=35.0, help="Camera vertical field of view in degrees.")
 parser.add_argument("--preset", choices=("newton_dvi", "newton_mjwarp"), default="newton_dvi")
 parser.add_argument("--joint-limit-iterations", type=int)
-parser.add_argument("--joint-limit-alpha", type=float)
-parser.add_argument("--joint-limit-recovery-speed", type=float)
-parser.add_argument(
-    "--joint-limit-tolerance",
-    type=float,
-    default=1.0e-5,
-    help="Maximum accepted limit excursion in direct-torque diagnostics (rad).",
-)
-parser.add_argument("--joint-limit-omega", type=float)
-parser.add_argument("--joint-limit-relax", type=float)
-parser.add_argument("--joint-limit-regularization", type=float)
-parser.add_argument("--physics-substeps", type=int, default=None, help="Override Newton substeps while preserving cfg.sim.dt; diagnostic only.")
 parser.add_argument("--coupling-iterations", type=int)
 parser.add_argument("--disable-post-stabilization", action="store_true")
 parser.add_argument("--contact-regularization", type=float)
@@ -73,18 +60,6 @@ parser.add_argument("--cmd-vy", type=float, default=0.3)
 parser.add_argument("--cmd-wz", type=float, default=0.7)
 parser.add_argument("--fixed-action-from-first", action="store_true", help="Diagnostic only: hold the first policy action for all control steps.")
 parser.add_argument("--actuator-excitation", action="store_true", help="Phase-1 actuator test: fixed base, global gravity off, robot collisions off, and sequential open-loop joint target steps (no policy inference).")
-parser.add_argument("--matched-actuator-initial-state", action="store_true", help="Phase-1 only: explicitly overwrite DVI q=default, qd=0 and root velocity=0 after reset, before the first control step; use with the matched MuJoCo recorder.")
-parser.add_argument("--direct-torque-excitation", action="store_true", help="Pure dynamics diagnostic: bypass UnitreeActuator PD, saturation, and passive terms; apply a prescribed sequential joint-torque waveform directly.")
-parser.add_argument("--direct-torque-amplitude", type=float, default=1.0, help="Per-joint torque amplitude (Nm) for --direct-torque-excitation.")
-parser.add_argument("--direct-torque-free-root", action="store_true", help="Direct-torque only: leave the floating root unprojected after one-time matched initialization.")
-parser.add_argument("--direct-torque-zero-input", action="store_true", help="Direct-torque only: apply zero torque throughout; asserts rest-state invariance.")
-parser.add_argument("--direct-torque-settle-steps", type=int, default=0, help="Direct-torque free-root only: warm the constraint solver at zero input, then capture that consistent pose as the comparison initial state.")
-parser.add_argument("--controlled-contact", choices=("off", "on"), help="Phase-3 isolated rear-foot landing with ground contact disabled or enabled.")
-parser.add_argument("--controlled-contact-side", choices=("left", "right"), default="left")
-parser.add_argument("--controlled-contact-downward-speed", type=float, default=0.5)
-parser.add_argument("--contact-gap", type=float, help="Override Newton's per-shape contact gap in metres.")
-parser.add_argument("--contact-margin", type=float, help="Override Newton's per-shape collision margin in metres.")
-parser.add_argument("--require-training-dvi-config", action="store_true", help="Fail unless the loaded saved config is used unchanged for the DVI solver fields relevant to training/playback.")
 parser.add_argument("--multibody-excitation", action="store_true", help="Phase-2 test: free root, collisions off, sequential open-loop joint target steps (no policy inference).")
 parser.add_argument("--multibody-gravity", choices=("off", "on"), default="off", help="Gravity condition for --multibody-excitation.")
 parser.add_argument("--excitation-amplitude", type=float, default=0.12, help="Joint-target amplitude in rad for --actuator-excitation.")
@@ -102,18 +77,12 @@ parser.add_argument("--perturbation-half-duration", type=float, default=4.0, hel
 UPRIGHT_BIPEDAL_ROOT_POS = (0.0, 0.0, 0.541318)
 UPRIGHT_BIPEDAL_ROOT_QUAT_XYZW = (0.059433, -0.738475, 0.043924, 0.670218)
 UPRIGHT_BIPEDAL_TARGET = (0.101630, 0.734117, -1.453078, -0.090235, 0.764567, -1.446473, 0.137010, 2.307323, -1.453031, -0.235372, 2.290217, -1.482530)
-CONTROLLED_CONTACT_ROOT = {
-    "left": ((0.0, 0.0, 0.5735), (0.00079349, -0.73183698, 0.10811924, 0.67284785)),
-    "right": ((0.0, 0.0, 0.5691), (0.11762024, -0.73949344, -0.02060549, 0.66248799)),
-}
-CONTROLLED_CONTACT_OFF_Z_OFFSET = 1.0
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 app = AppLauncher(args).app
 
 import gymnasium as gym
 import isaaclab.sim as sim_utils
-from isaaclab.envs import mdp
 import imageio.v2 as imageio
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -161,34 +130,10 @@ def main() -> None:
     else:
         cfg = load_cfg_from_registry(task, "play_env_cfg_entry_point")
         cfg = resolve_presets(cfg, {args.preset})
-    if args.require_training_dvi_config and not args.saved_env_cfg:
-        raise ValueError("--require-training-dvi-config requires --saved-env-cfg")
-    if args.physics_substeps is not None:
-        if args.physics_substeps < 1:
-            raise ValueError("--physics-substeps must be positive")
-        cfg.sim.physics.num_substeps = args.physics_substeps
     if args.joint_limit_iterations is not None:
         cfg.sim.physics.solver_cfg.joint_limit_max_iterations = args.joint_limit_iterations
-    if args.joint_limit_alpha is not None:
-        cfg.sim.physics.solver_cfg.joint_limit_alpha = args.joint_limit_alpha
-    if args.joint_limit_recovery_speed is not None:
-        cfg.sim.physics.solver_cfg.joint_limit_recovery_speed = args.joint_limit_recovery_speed
-    if args.joint_limit_omega is not None:
-        cfg.sim.physics.solver_cfg.joint_limit_omega = args.joint_limit_omega
-    if args.joint_limit_relax is not None:
-        cfg.sim.physics.solver_cfg.joint_limit_relax = args.joint_limit_relax
-    if args.joint_limit_regularization is not None:
-        cfg.sim.physics.solver_cfg.joint_limit_reg = args.joint_limit_regularization
     if args.coupling_iterations is not None:
         cfg.sim.physics.solver_cfg.coupling_iterations = args.coupling_iterations
-    if args.contact_gap is not None:
-        if args.contact_gap < 0.0:
-            raise ValueError("--contact-gap must be nonnegative")
-        cfg.sim.physics.default_shape_cfg.gap = args.contact_gap
-    if args.contact_margin is not None:
-        if args.contact_margin < 0.0:
-            raise ValueError("--contact-margin must be nonnegative")
-        cfg.sim.physics.default_shape_cfg.margin = args.contact_margin
     if args.disable_post_stabilization:
         cfg.sim.physics.solver_cfg.post_stabilize_joints = False
     if args.contact_regularization is not None:
@@ -206,13 +151,6 @@ def main() -> None:
     solver_cfg = cfg.sim.physics.solver_cfg
     print(
         "EFFECTIVE_DVI_PARAMS "
-        f"joint_limit_solver_type={solver_cfg.joint_limit_solver_type} "
-        f"joint_limit_max_iterations={solver_cfg.joint_limit_max_iterations} "
-        f"joint_limit_omega={solver_cfg.joint_limit_omega} "
-        f"joint_limit_relax={solver_cfg.joint_limit_relax} "
-        f"joint_limit_reg={solver_cfg.joint_limit_reg} "
-        f"joint_limit_alpha={solver_cfg.joint_limit_alpha} "
-        f"joint_limit_recovery_speed={solver_cfg.joint_limit_recovery_speed} "
         f"contact_solver_type={solver_cfg.contact_solver_type} "
         f"contact_early_exit={solver_cfg.contact_early_exit} "
         f"contact_tolerance={solver_cfg.contact_tolerance} "
@@ -239,8 +177,6 @@ def main() -> None:
     )
     if args.num_envs < 1:
         raise ValueError("--num-envs must be positive")
-    if args.joint_limit_tolerance < 0.0:
-        raise ValueError("--joint-limit-tolerance must be nonnegative")
     cfg.scene.num_envs = args.num_envs
     cfg.seed = args.seed
     cfg.sim.device = args.device
@@ -255,105 +191,15 @@ def main() -> None:
         for name in vars(cfg.terminations):
             if not name.startswith("_"):
                 setattr(cfg.terminations, name, None)
-    if args.actuator_excitation or (args.direct_torque_excitation and not args.direct_torque_free_root) or args.upright_perturbation:
+    if args.actuator_excitation or args.upright_perturbation:
         # Phase 1 isolates the exact native actuator path from root, gravity,
-        # terrain, and contact.  Preserve the training topology, then impose
-        # the diagnostic fixed base by root-state projection after each step.
+        # terrain, and contact.  Use a real fixed root constraint rather than
+        # overwriting base state after each integration step.
         cfg.sim.gravity = (0.0, 0.0, 0.0)
         cfg.scene.robot.spawn.rigid_props.disable_gravity = True
-        # NOTE: do NOT use `articulation_props.fix_root_link` here.  A fixed root
-        # joint is itself a fixed joint, so the training-time
-        # `collapse_fixed_joints=True` merges `base` into the world.  The
-        # articulation then has no root body: all four hip joints become
-        # parent == -1 roots, `ArticulationView` reports neither `is_fixed_base`
-        # nor `is_floating_base`, and `get/set_root_transforms` silently aliases
-        # `joint_X_p[joint 0]` == `FL_hip_joint`
-        # (`newton/_src/utils/selection.py:1402-1425`).  IsaacLab's root-pose
-        # write then overwrites the FL hip MOUNT with the root pose, displacing
-        # only the FL chain and dropping `base` from body telemetry.
-        #
-        # Instead keep the exact training model (floating base + collapse) and
-        # impose the fixed root kinematically by projecting the root state back
-        # to its reference after every control step.  This is also precisely what
-        # the MuJoCo Phase-1 counterpart does
-        # (`run_go2_fixed_base_actuator_excitation_mujoco.py`), so the two sides
-        # stay methodologically identical.
-        cfg.scene.robot.spawn.articulation_props.fix_root_link = False
+        cfg.scene.robot.spawn.articulation_props.fix_root_link = True
         cfg.scene.robot.spawn.articulation_props.enabled_self_collisions = False
         cfg.scene.robot.spawn.collision_props = sim_utils.CollisionPropertiesCfg(collision_enabled=False)
-    if args.direct_torque_excitation:
-        # Free-root torque diagnostics still require the same zero-gravity,
-        # collision-free world; only the post-step root projection is omitted.
-        if args.direct_torque_free_root:
-            cfg.sim.gravity = (0.0, 0.0, 0.0)
-            cfg.scene.robot.spawn.rigid_props.disable_gravity = True
-            cfg.scene.robot.spawn.articulation_props.fix_root_link = False
-            cfg.scene.robot.spawn.articulation_props.enabled_self_collisions = False
-            cfg.scene.robot.spawn.collision_props = sim_utils.CollisionPropertiesCfg(collision_enabled=False)
-        if args.actuator_excitation or args.upright_perturbation or args.multibody_excitation:
-            raise ValueError("--direct-torque-excitation is mutually exclusive with the other diagnostic modes")
-        if args.direct_torque_zero_input and not args.direct_torque_free_root:
-            raise ValueError("--direct-torque-zero-input requires --direct-torque-free-root")
-        # Feed-forward effort with every normal UnitreeActuator contribution
-        # neutralized: DVI receives precisely the commanded joint torque.
-        cfg.actions.JointPositionAction = mdp.JointEffortActionCfg(
-            asset_name="robot", joint_names=[".*"], scale=1.0, clip={".*": (-100.0, 100.0)}
-        )
-        for actuator_cfg in cfg.scene.robot.actuators.values():
-            actuator_cfg.stiffness = 0.0
-            actuator_cfg.damping = 0.0
-            actuator_cfg.friction = 0.0
-            # Disable the Unitree torque-speed envelope too. Direct mode must
-            # remain an exact force input even if the diagnostic drives a joint
-            # beyond the Go2HV no-load speed.
-            actuator_cfg.X1 = 1.0e9
-            actuator_cfg.X2 = 2.0e9
-            actuator_cfg.Y1 = 1.0e9
-            actuator_cfg.Y2 = 1.0e9
-            actuator_cfg.Fs = 0.0
-            actuator_cfg.Fd = 0.0
-            actuator_cfg.min_delay = 0
-            actuator_cfg.max_delay = 0
-        # One environment step is one 5 ms physics sample.
-        cfg.decimation = 1
-    if args.controlled_contact:
-        if args.controlled_contact_downward_speed <= 0.0:
-            raise ValueError("--controlled-contact-downward-speed must be positive")
-        cfg.sim.gravity = (0.0, 0.0, 0.0)
-        cfg.scene.robot.spawn.rigid_props.disable_gravity = True
-        cfg.scene.robot.spawn.articulation_props.fix_root_link = False
-        cfg.scene.robot.spawn.articulation_props.enabled_self_collisions = False
-        if args.controlled_contact == "off":
-            cfg.scene.robot.spawn.collision_props = sim_utils.CollisionPropertiesCfg(collision_enabled=False)
-        cfg.actions.JointPositionAction = mdp.JointEffortActionCfg(
-            asset_name="robot", joint_names=[".*"], scale=1.0, clip={".*": (-100.0, 100.0)}
-        )
-        for actuator_cfg in cfg.scene.robot.actuators.values():
-            actuator_cfg.stiffness = 0.0
-            actuator_cfg.damping = 0.0
-            actuator_cfg.friction = 0.0
-            actuator_cfg.X1 = 1.0e9
-            actuator_cfg.X2 = 2.0e9
-            actuator_cfg.Y1 = 1.0e9
-            actuator_cfg.Y2 = 1.0e9
-            actuator_cfg.Fs = 0.0
-            actuator_cfg.Fd = 0.0
-            actuator_cfg.min_delay = 0
-            actuator_cfg.max_delay = 0
-        contact_pos, contact_quat = CONTROLLED_CONTACT_ROOT[args.controlled_contact_side]
-        if args.controlled_contact == "off":
-            contact_pos = (contact_pos[0], contact_pos[1], contact_pos[2] + CONTROLLED_CONTACT_OFF_Z_OFFSET)
-        cfg.scene.robot.init_state.pos = contact_pos
-        cfg.scene.robot.init_state.rot = contact_quat
-        cfg.scene.robot.init_state.lin_vel = (0.0, 0.0, -args.controlled_contact_downward_speed)
-        cfg.scene.robot.init_state.ang_vel = (0.0, 0.0, 0.0)
-        cfg.scene.robot.init_state.joint_pos = {
-            name: float(value) for name, value in zip(
-                ("FL_hip_joint", "FL_thigh_joint", "FL_calf_joint", "FR_hip_joint", "FR_thigh_joint", "FR_calf_joint", "RL_hip_joint", "RL_thigh_joint", "RL_calf_joint", "RR_hip_joint", "RR_thigh_joint", "RR_calf_joint"),
-                UPRIGHT_BIPEDAL_TARGET,
-            )
-        }
-        cfg.decimation = 1
     if args.multibody_excitation:
         # Phase 2 retains the floating base while removing contact constraints.
         # The same policy-disabled Go2HV target sequence then probes only free
@@ -390,7 +236,7 @@ def main() -> None:
         }
         cfg.events.reset_robot_joints.params["position_range"] = (0.0, 0.0)
         cfg.events.reset_robot_joints.params["velocity_range"] = (0.0, 0.0)
-    cfg.sim.enable_newton_rendering = not args.no_video
+    cfg.sim.enable_newton_rendering = True
     if args.flat_terrain:
         # Retain the run's native solver configuration while replacing only the
         # evaluation geometry with the same infinite plane used by the base task.
@@ -447,27 +293,19 @@ def main() -> None:
     env = gym.make(task, cfg=cfg, render_mode=None)
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
     robot_data_for_params = env.unwrapped.scene["robot"].data
-    if args.controlled_contact:
-        from isaaclab_newton.physics import NewtonManager
-
-        model = NewtonManager.get_model()
-        shape_labels = list(model.shape_label)
-        shape_gap = model.shape_gap.numpy()
-        shape_margin = model.shape_margin.numpy()
-        if args.contact_gap is not None:
-            shape_gap.fill(args.contact_gap)
-            model.shape_gap.assign(shape_gap)
-        if args.contact_margin is not None:
-            shape_margin.fill(args.contact_margin)
-            model.shape_margin.assign(shape_margin)
-        for shape_index, shape_label in enumerate(shape_labels):
-            lower_label = shape_label.lower()
-            if "ground" in lower_label or f"/r{args.controlled_contact_side[0]}_foot/" in lower_label:
-                print(
-                    f"CONTROLLED_CONTACT_SHAPE index={shape_index} label={shape_label!r} "
-                    f"gap_m={shape_gap[shape_index]:.9g} margin_m={shape_margin[shape_index]:.9g}",
-                    flush=True,
-                )
+    robot = env.unwrapped.scene["robot"]
+    model = robot.root_view.model
+    print("AUDIT_BODY_NAMES", list(enumerate(robot.body_names)), flush=True)
+    print("AUDIT_VIEW_TYPE", type(robot.root_view).__name__, flush=True)
+    print("AUDIT_VIEW_LINKS", list(enumerate(robot.root_view.link_names)), flush=True)
+    print("AUDIT_MODEL_BODIES", list(enumerate(model.body_label)), flush=True)
+    print("AUDIT_MODEL_BODY_WORLD", model.body_world.numpy().tolist(), flush=True)
+    print("AUDIT_MODEL_BODY_Q", model.body_q.numpy().tolist(), flush=True)
+    for key, layout in robot.root_view.frequency_layouts.items():
+        print("AUDIT_LAYOUT", key, "offset", layout.offset, "between", layout.stride_between_worlds, "within", layout.stride_within_worlds, "value_count", layout.value_count, "slice", layout.slice, flush=True)
+    print("AUDIT_VIEW_TRANSFORMS", robot.root_view.get_link_transforms(env.unwrapped.sim._state_0).numpy().tolist(), flush=True)
+    env.close()
+    return
 
     def _param_np(value):
         value = value.torch if hasattr(value, "torch") else value
@@ -491,21 +329,20 @@ def main() -> None:
         flush=True,
     )
     policy = None
-    if not (args.actuator_excitation or args.direct_torque_excitation or args.controlled_contact or args.multibody_excitation or args.upright_perturbation):
+    if not (args.actuator_excitation or args.multibody_excitation or args.upright_perturbation):
         runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
         runner.load(str(args.checkpoint.resolve()))
         policy = runner.get_inference_policy(device=env.unwrapped.device)
 
     visualizer = next((v for v in env.unwrapped.sim._visualizers if hasattr(v, "_viewer")), None)
-    if not args.no_video and visualizer is None:
+    if visualizer is None:
         raise RuntimeError(f"Newton visualizer was not initialized: {env.unwrapped.sim._visualizers!r}")
-    viewer = visualizer._viewer if visualizer is not None else None
+    viewer = visualizer._viewer
 
     # Camera is updated per frame below when --follow-robot is enabled.
-    if viewer is not None:
-        viewer.camera.fov = args.camera_fov
+    viewer.camera.fov = args.camera_fov
 
-    if sum((args.zero_command, args.single_command, args.phased_commands, args.zero_neg_pos, args.actuator_excitation, args.direct_torque_excitation, bool(args.controlled_contact), args.multibody_excitation, args.upright_perturbation)) > 1:
+    if sum((args.zero_command, args.single_command, args.phased_commands, args.zero_neg_pos, args.actuator_excitation, args.multibody_excitation, args.upright_perturbation)) > 1:
         raise ValueError("command playback modes, --actuator-excitation, --multibody-excitation, and --upright-perturbation are mutually exclusive")
     cmd_mgr = env.unwrapped.command_manager
     phases = [
@@ -545,12 +382,6 @@ def main() -> None:
     frames: list[np.ndarray] = []
     root_start = None
     root_end = None
-    # Phase-1/1b keeps the training-time floating-base + collapsed-link model,
-    # then imposes its diagnostic fixed base by restoring this state after every
-    # environment step.  This matches the MuJoCo Phase-1 harness exactly.
-    project_root = args.actuator_excitation or (args.direct_torque_excitation and not args.direct_torque_free_root) or args.upright_perturbation
-    root_projection_state = None
-    root_projection_max_pre_error = 0.0
     telemetry_time: list[float] = []
     telemetry_joint_pos: list[np.ndarray] = []
     telemetry_contact: list[np.ndarray] = []
@@ -570,79 +401,7 @@ def main() -> None:
     telemetry_rear_foot_pos: list[np.ndarray] = []
     telemetry_rear_contact_force: list[np.ndarray] = []
     telemetry_done: list[np.ndarray] = []
-    robot = env.unwrapped.scene["robot"]
-    robot_data = robot.data
-    # Audit imported limits before stepping. The data views are the exact DVI
-    # model fields used by its joint-limit solver, in articulation-joint order.
-    limit_lo = robot_data.joint_pos_limits[..., 0]
-    limit_hi = robot_data.joint_pos_limits[..., 1]
-    limit_lo = limit_lo.torch if hasattr(limit_lo, "torch") else limit_lo
-    limit_hi = limit_hi.torch if hasattr(limit_hi, "torch") else limit_hi
-    limit_lo_np, limit_hi_np = limit_lo[0].detach().cpu().numpy(), limit_hi[0].detach().cpu().numpy()
-    if args.direct_torque_excitation and (not np.all(np.isfinite(limit_lo_np)) or not np.all(np.isfinite(limit_hi_np)) or np.any(limit_hi_np <= limit_lo_np)):
-        raise RuntimeError(f"Invalid imported DVI joint limits: lower={limit_lo_np} upper={limit_hi_np}")
-    print(f"DVI_JOINT_LIMITS names={list(robot_data.joint_names)} lower={limit_lo_np.tolist()} upper={limit_hi_np.tolist()}", flush=True)
-    # A reset may contain one settling/integration interval.  For the solver
-    # comparison, eliminate that hidden history explicitly: both DVI and
-    # MuJoCo begin the first applied-control interval at q=default and qd=0.
-    # Preserve DVI's instantiated world pose (each environment's origin), but
-    # zero its velocity and use that same pose for the fixed-root projection.
-    matched_initial_state_error = None
-    if args.matched_actuator_initial_state:
-        if not (args.actuator_excitation or args.direct_torque_excitation):
-            raise ValueError("--matched-actuator-initial-state requires an actuator diagnostic")
-        q0 = robot_data.default_joint_pos
-        q0 = q0.torch if hasattr(q0, "torch") else q0
-        q0 = q0.detach().clone()
-        qd0 = torch.zeros_like(q0)
-        root_pose0 = robot_data.root_link_pose_w
-        root_pose0 = root_pose0.torch if hasattr(root_pose0, "torch") else root_pose0
-        root_pose0 = root_pose0.detach().clone()
-        root_velocity0 = torch.zeros((args.num_envs, 6), dtype=root_pose0.dtype, device=root_pose0.device)
-        robot.write_joint_state_to_sim_index(position=q0, velocity=qd0)
-        robot.write_root_link_pose_to_sim_index(root_pose=root_pose0)
-        robot.write_root_link_velocity_to_sim_index(root_velocity=root_velocity0)
-        q_check = robot_data.joint_pos
-        q_check = q_check.torch if hasattr(q_check, "torch") else q_check
-        qd_check = robot_data.joint_vel
-        qd_check = qd_check.torch if hasattr(qd_check, "torch") else qd_check
-        matched_initial_state_error = max(
-            float(torch.max(torch.abs(q_check - q0)).item()),
-            float(torch.max(torch.abs(qd_check - qd0)).item()),
-        )
-        if matched_initial_state_error > 1.0e-7:
-            raise RuntimeError(f"Matched actuator initialization failed: max state error {matched_initial_state_error:.6g}")
-    settled_initial_state_error = None
-    if args.direct_torque_settle_steps:
-        if not (args.direct_torque_excitation and args.direct_torque_free_root):
-            raise ValueError("--direct-torque-settle-steps requires --direct-torque-excitation --direct-torque-free-root")
-        if args.direct_torque_settle_steps < 1:
-            raise ValueError("--direct-torque-settle-steps must be positive")
-        zero_actions = torch.zeros((args.num_envs, len(robot_data.joint_names)), dtype=torch.float32, device=env.unwrapped.device)
-        # Let the DVI bilateral constraints remove only their initial numerical
-        # residual. This is not part of the logged experiment.
-        for _ in range(args.direct_torque_settle_steps):
-            obs, _, _, _ = env.step(zero_actions)
-        q_settle = robot_data.joint_pos
-        q_settle = q_settle.torch if hasattr(q_settle, "torch") else q_settle
-        root_settle = robot_data.root_link_pose_w
-        root_settle = root_settle.torch if hasattr(root_settle, "torch") else root_settle
-        robot.write_joint_state_to_sim_index(position=q_settle.detach().clone(), velocity=torch.zeros_like(q_settle))
-        robot.write_root_link_pose_to_sim_index(root_pose=root_settle.detach().clone())
-        robot.write_root_link_velocity_to_sim_index(root_velocity=torch.zeros((args.num_envs, 6), dtype=root_settle.dtype, device=root_settle.device))
-        q_post = robot_data.joint_pos; q_post = q_post.torch if hasattr(q_post, "torch") else q_post
-        qd_post = robot_data.joint_vel; qd_post = qd_post.torch if hasattr(qd_post, "torch") else qd_post
-        settled_initial_state_error = max(float(torch.max(torch.abs(q_post-q_settle)).item()), float(torch.max(torch.abs(qd_post)).item()))
-        if settled_initial_state_error > 1e-7:
-            raise RuntimeError(f"Settled-state initialization failed: {settled_initial_state_error:.6g}")
-        print(f"DVI_SETTLED_INITIALIZATION warmup_steps={args.direct_torque_settle_steps} state_error={settled_initial_state_error:.6g}", flush=True)
-    if project_root:
-        root_pose = robot_data.root_link_pose_w
-        root_pose = root_pose.torch if hasattr(root_pose, "torch") else root_pose
-        root_projection_state = torch.cat(
-            (root_pose.detach().clone(), torch.zeros((args.num_envs, 6), dtype=root_pose.dtype, device=root_pose.device)),
-            dim=-1,
-        )
+    robot_data = env.unwrapped.scene["robot"].data
     rear_joint_indices = []
     rear_joint_names = []
     rear_sensor = None
@@ -664,9 +423,7 @@ def main() -> None:
         ]
     frame_stride = max(1, round(1.0 / (args.fps * env.unwrapped.step_dt)))
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    writer = None if args.no_video else imageio.get_writer(
-        str(args.output), fps=args.fps, codec="libx264", pixelformat="yuv420p", quality=8
-    )
+    writer = imageio.get_writer(str(args.output), fps=args.fps, codec="libx264", pixelformat="yuv420p", quality=8)
     font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
     small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 16)
     fixed_action = None
@@ -681,13 +438,7 @@ def main() -> None:
                 force_command(command)
             with torch.inference_mode():
                 policy_obs = obs.clone()
-                if args.controlled_contact:
-                    actions = torch.zeros(
-                        (args.num_envs, len(robot_data.joint_names)),
-                        dtype=torch.float32,
-                        device=env.unwrapped.device,
-                    )
-                elif args.actuator_excitation or args.direct_torque_excitation or args.multibody_excitation:
+                if args.actuator_excitation or args.multibody_excitation:
                     # Raw action is target offset / 0.25, matching the frozen
                     # JointPositionAction configuration.  Each joint receives
                     # rest → +step → -step → rest while every other target is
@@ -697,10 +448,9 @@ def main() -> None:
                     local = step % excitation_segment_steps
                     n_rest = max(1, round(args.excitation_rest / env.unwrapped.step_dt))
                     n_hold = max(1, round(args.excitation_hold / env.unwrapped.step_dt))
-                    amplitude = args.direct_torque_amplitude if args.direct_torque_excitation else args.excitation_amplitude
-                    target_offset = 0.0 if (args.direct_torque_zero_input or local < n_rest or local >= n_rest + 2 * n_hold) else (amplitude if local < n_rest + n_hold else -amplitude)
+                    target_offset = 0.0 if local < n_rest or local >= n_rest + 2 * n_hold else (args.excitation_amplitude if local < n_rest + n_hold else -args.excitation_amplitude)
                     actions = torch.zeros((args.num_envs, num_joints), dtype=torch.float32, device=env.unwrapped.device)
-                    actions[:, joint_index] = target_offset if args.direct_torque_excitation else target_offset / 0.25
+                    actions[:, joint_index] = target_offset / 0.25
                 elif args.upright_perturbation:
                     # Fixed, deterministic multi-joint targets around the
                     # bipedal default pose. The first half uses the measured
@@ -729,7 +479,7 @@ def main() -> None:
                     policy_obs["policy"][:, command_start:command_start + 3] = torch.as_tensor(
                         command, dtype=policy_obs["policy"].dtype, device=policy_obs["policy"].device
                     )
-                if args.actuator_excitation or args.direct_torque_excitation or args.controlled_contact or args.multibody_excitation or args.upright_perturbation:
+                if args.actuator_excitation or args.multibody_excitation or args.upright_perturbation:
                     pass
                 elif fixed_action is None:
                     actions = policy(policy_obs)
@@ -740,15 +490,6 @@ def main() -> None:
                 else:
                     actions = policy(obs)
                 obs, _, dones, _ = env.step(actions)
-                if project_root:
-                    current_pose = robot_data.root_link_pose_w
-                    current_pose = current_pose.torch if hasattr(current_pose, "torch") else current_pose
-                    root_projection_max_pre_error = max(
-                        root_projection_max_pre_error,
-                        float(torch.max(torch.abs(current_pose - root_projection_state[:, :7])).item()),
-                    )
-                    robot.write_root_link_pose_to_sim_index(root_pose=root_projection_state[:, :7])
-                    robot.write_root_link_velocity_to_sim_index(root_velocity=root_projection_state[:, 7:])
                 if policy is not None:
                     policy.reset(dones)
             root_value = env.unwrapped.scene["robot"].data.root_pos_w[0]
@@ -764,7 +505,7 @@ def main() -> None:
                 force_command((args.cmd_vx, args.cmd_vy, args.cmd_wz))
             elif args.phased_commands:
                 force_command(phases[phase_index][1])
-            if not args.no_video and step % frame_stride == 0:
+            if step % frame_stride == 0:
                 if args.follow_robot:
                     root = env.unwrapped.scene["robot"].data.root_pos_w[0]
                     root = root.torch if hasattr(root, "torch") else root
@@ -821,29 +562,9 @@ def main() -> None:
                 telemetry_rear_contact_force.append(forces.copy())
                 telemetry_done.append(dones.detach().cpu().numpy().copy())
     finally:
-        if writer is not None:
-            writer.close()
+        writer.close()
         env.close()
-    if project_root:
-        final_pose = robot_data.root_link_pose_w
-        final_pose = final_pose.torch if hasattr(final_pose, "torch") else final_pose
-        root_projection_post_error = float(
-            torch.max(torch.abs(final_pose - root_projection_state[:, :7])).item()
-        )
-        if root_projection_post_error > 1.0e-5:
-            raise RuntimeError(
-                f"Phase-1 root projection post-write error exceeds tolerance: {root_projection_post_error:.6g}"
-            )
-    else:
-        root_projection_post_error = None
     if args.telemetry:
-        root_pos_array = np.asarray(telemetry_root_pos)
-        body_pos_array = np.asarray(telemetry_body_pos)
-        rear_foot_pos_array = np.asarray(telemetry_rear_foot_pos)
-        if args.controlled_contact == "off":
-            root_pos_array[..., 2] -= CONTROLLED_CONTACT_OFF_Z_OFFSET
-            body_pos_array[..., 2] -= CONTROLLED_CONTACT_OFF_Z_OFFSET
-            rear_foot_pos_array[..., 2] -= CONTROLLED_CONTACT_OFF_Z_OFFSET
         args.telemetry.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(
             args.telemetry,
@@ -852,19 +573,13 @@ def main() -> None:
             contact_names=np.asarray(getattr(rear_sensor, "body_names", ["RL_foot", "RR_foot"])),
             obs=np.asarray(telemetry_obs), action=np.asarray(telemetry_action),
             all_joint_pos=np.asarray(telemetry_all_joint_pos), body_names=np.asarray(robot_data.body_names),
-            body_pos_w=body_pos_array, joint_vel=np.asarray(telemetry_joint_vel),
+            body_pos_w=np.asarray(telemetry_body_pos), joint_vel=np.asarray(telemetry_joint_vel),
             joint_pos_target=np.asarray(telemetry_joint_target), computed_torque=np.asarray(telemetry_computed_torque),
             applied_torque=np.asarray(telemetry_applied_torque), all_joint_names=np.asarray(robot_data.joint_names),
-            root_pos=root_pos_array, root_quat_xyzw=np.asarray(telemetry_root_quat),
+            root_pos=np.asarray(telemetry_root_pos), root_quat_xyzw=np.asarray(telemetry_root_quat),
             root_lin_vel_w=np.asarray(telemetry_root_lin_vel), root_ang_vel_w=np.asarray(telemetry_root_ang_vel),
-            projected_gravity_b=np.asarray(telemetry_projected_gravity), rear_foot_pos=rear_foot_pos_array,
+            projected_gravity_b=np.asarray(telemetry_projected_gravity), rear_foot_pos=np.asarray(telemetry_rear_foot_pos),
             rear_contact_force_w=np.asarray(telemetry_rear_contact_force), done=np.asarray(telemetry_done),
-            root_projection_enabled=np.asarray(project_root),
-            matched_actuator_initial_state=np.asarray(args.matched_actuator_initial_state),
-            matched_actuator_initial_state_error=np.asarray(matched_initial_state_error),
-            root_projection_max_pre_error=np.asarray(root_projection_max_pre_error),
-            root_projection_post_error=np.asarray(root_projection_post_error),
-            joint_limit_lower=limit_lo_np, joint_limit_upper=limit_hi_np,
         )
     root_delta = root_end - root_start
     print(
@@ -872,55 +587,12 @@ def main() -> None:
         f"horizontal={np.linalg.norm(root_delta[:2]):.6f}",
         flush=True,
     )
-    if project_root:
-        root_delta_inf = float(np.max(np.abs(root_delta)))
-        print(
-            f"ROOT_PROJECTION mode=kinematic training_topology=1 "
-            f"max_pre_projection_state_error={root_projection_max_pre_error:.6g} "
-            f"post_projection_state_error={root_projection_post_error:.6g} "
-            f"post_projection_root_delta_inf={root_delta_inf:.6g}",
-            flush=True,
-        )
-        if root_delta_inf > 1.0e-5:
-            raise RuntimeError(f"Phase-1 root projection drift exceeds tolerance: {root_delta_inf:.6g}")
     if args.actuator_excitation:
         print(
             f"ACTUATOR_EXCITATION native fixed_root=1 gravity=[0,0,0] collisions=0 "
-            f"matched_initial_state={int(args.matched_actuator_initial_state)} "
-            f"initial_state_error={matched_initial_state_error} "
             f"amplitude_rad={args.excitation_amplitude} rest_s={args.excitation_rest} hold_s={args.excitation_hold}",
             flush=True,
         )
-    if args.direct_torque_excitation:
-        applied = np.asarray(telemetry_applied_torque)
-        command = np.asarray(telemetry_action)
-        torque_error = float(np.max(np.abs(applied - command)))
-        print(
-            f"DIRECT_TORQUE_EXCITATION native root_projection={int(project_root)} gravity=[0,0,0] collisions=0 "
-            f"physics_dt_s={env.unwrapped.step_dt} amplitude_Nm={args.direct_torque_amplitude} "
-            f"max_applied_minus_command_Nm={torque_error:.6g}", flush=True,
-        )
-        if torque_error > 1.0e-5:
-            raise RuntimeError(f"Direct effort was altered by the DVI actuator path: {torque_error:.6g} Nm")
-        q_trace = np.asarray(telemetry_all_joint_pos)
-        qd_trace = np.asarray(telemetry_joint_vel)
-        limit_violation = float(max(np.max(q_trace - limit_hi_np), np.max(limit_lo_np - q_trace), 0.0))
-        print(
-            f"DVI_DIRECT_LIMIT_GATE max_violation_rad={limit_violation:.6g} "
-            f"tolerance_rad={args.joint_limit_tolerance:.6g}",
-            flush=True,
-        )
-        if limit_violation > args.joint_limit_tolerance:
-            raise RuntimeError(
-                f"DVI joint-limit gate failed: max violation {limit_violation:.6g} rad "
-                f"> tolerance {args.joint_limit_tolerance:.6g} rad"
-            )
-        if args.direct_torque_zero_input:
-            drift_q = float(np.max(np.abs(q_trace - q_trace[0])))
-            drift_qd = float(np.max(np.abs(qd_trace)))
-            print(f"DVI_ZERO_INPUT_GATE max_joint_displacement_rad={drift_q:.6g} max_joint_velocity_radps={drift_qd:.6g}", flush=True)
-            if drift_q > 1.0e-6 or drift_qd > 1.0e-6:
-                raise RuntimeError("DVI free-root zero-input rest gate failed")
     if args.upright_perturbation:
         print(
             f"UPRIGHT_PERTURBATION native fixed_root=1 gravity=[0,0,0] collisions=0 "
@@ -932,19 +604,6 @@ def main() -> None:
         print(
             f"MULTIBODY_EXCITATION native fixed_root=0 gravity={args.multibody_gravity} collisions=0 "
             f"amplitude_rad={args.excitation_amplitude} rest_s={args.excitation_rest} hold_s={args.excitation_hold}",
-            flush=True,
-        )
-    if args.controlled_contact:
-        contact_trace = np.asarray(telemetry_contact)
-        selected_index = 0 if args.controlled_contact_side == "left" else 1
-        selected_contact = contact_trace[:, selected_index]
-        first_contact = np.flatnonzero(selected_contact)
-        print(
-            f"CONTROLLED_CONTACT native mode={args.controlled_contact} side={args.controlled_contact_side} "
-            f"gravity=off self_collisions=0 downward_speed_mps={args.controlled_contact_downward_speed} "
-            f"shape_gap_m={cfg.sim.physics.default_shape_cfg.gap} "
-            f"shape_margin_m={cfg.sim.physics.default_shape_cfg.margin} "
-            f"first_contact_step={None if first_contact.size == 0 else int(first_contact[0])}",
             flush=True,
         )
     print(
