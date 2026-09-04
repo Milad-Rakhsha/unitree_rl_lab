@@ -59,6 +59,7 @@ private:
     std::thread policy_thread;
     std::atomic<bool> policy_thread_running{false};
 
+    std::mutex observation_mutex;
     std::mutex action_mutex;
     std::vector<float> latest_action;
 

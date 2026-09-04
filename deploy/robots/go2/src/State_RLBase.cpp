@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace
@@ -78,6 +79,7 @@ State_RLBase::State_RLBase(int state_mode, std::string state_string)
             this->registered_checks.emplace_back(
                 std::make_pair(
                     [this, bad_orientation_limit, desired_gravity, state_string]() -> bool {
+                        std::lock_guard<std::mutex> lock(observation_mutex);
                         const bool bad =
                             isaaclab::mdp::bad_target_orientation(env.get(), bad_orientation_limit, desired_gravity);
                         if (bad)
@@ -117,6 +119,7 @@ State_RLBase::State_RLBase(int state_mode, std::string state_string)
             this->registered_checks.emplace_back(
                 std::make_pair(
                     [this, bad_orientation_limit, state_string]() -> bool {
+                        std::lock_guard<std::mutex> lock(observation_mutex);
                         const bool bad = isaaclab::mdp::bad_orientation(env.get(), bad_orientation_limit);
                         if (bad)
                         {
@@ -145,6 +148,7 @@ State_RLBase::State_RLBase(int state_mode, std::string state_string)
         this->registered_checks.emplace_back(
             std::make_pair(
                 [this, bad_orientation_limit, state_string]() -> bool {
+                    std::lock_guard<std::mutex> lock(observation_mutex);
                     const bool bad = isaaclab::mdp::bad_orientation(env.get(), bad_orientation_limit);
                     if (bad)
                     {
@@ -179,6 +183,7 @@ State_RLBase::State_RLBase(int state_mode, std::string state_string)
         this->registered_checks.emplace_back(
             std::make_pair(
                 [this, bad_roll_limit, state_string]() -> bool {
+                    std::lock_guard<std::mutex> lock(observation_mutex);
                     const bool bad = isaaclab::mdp::bad_roll_gravity_y(env.get(), bad_roll_limit);
                     if (bad)
                     {
@@ -439,11 +444,28 @@ void State_RLBase::csv_write_row(
 {
     if (!csv_log_enabled_ || !csv_file_.is_open()) return;
 
-    const auto& q = env->robot->data.joint_pos;
-    const auto& qv = env->robot->data.joint_vel;
-    const auto& quat = env->robot->data.root_quat_w;
-    const auto& w_b = env->robot->data.root_ang_vel_b;
-    auto* joystick = env->robot->data.joystick;
+    Eigen::VectorXf q;
+    Eigen::VectorXf qv;
+    Eigen::Quaternionf quat;
+    Eigen::Vector3f w_b;
+    float joystick_lx = 0.0f;
+    float joystick_ly = 0.0f;
+    float joystick_rx = 0.0f;
+    bool has_joystick = false;
+    {
+        std::lock_guard<std::mutex> lock(observation_mutex);
+        q = env->robot->data.joint_pos;
+        qv = env->robot->data.joint_vel;
+        quat = env->robot->data.root_quat_w;
+        w_b = env->robot->data.root_ang_vel_b;
+        if (auto* joystick = env->robot->data.joystick)
+        {
+            joystick_lx = joystick->lx();
+            joystick_ly = joystick->ly();
+            joystick_rx = joystick->rx();
+            has_joystick = true;
+        }
+    }
 
     const float qw = quat.w(), qx = quat.x(), qy = quat.y(), qz = quat.z();
     const float roll = std::atan2(2.0f * (qw * qx + qy * qz), 1.0f - 2.0f * (qx * qx + qy * qy));
@@ -452,12 +474,12 @@ void State_RLBase::csv_write_row(
     const float yaw = std::atan2(2.0f * (qw * qz + qx * qy), 1.0f - 2.0f * (qy * qy + qz * qz));
 
     float cmd_vx = 0.0f, cmd_vy = 0.0f, cmd_wz = 0.0f;
-    if (joystick && env->cfg["commands"] && env->cfg["commands"]["base_velocity"])
+    if (has_joystick && env->cfg["commands"] && env->cfg["commands"]["base_velocity"])
     {
         const auto ranges = env->cfg["commands"]["base_velocity"]["ranges"];
-        cmd_vx = std::clamp(joystick->ly(), ranges["lin_vel_x"][0].as<float>(), ranges["lin_vel_x"][1].as<float>());
-        cmd_vy = std::clamp(-joystick->lx(), ranges["lin_vel_y"][0].as<float>(), ranges["lin_vel_y"][1].as<float>());
-        cmd_wz = std::clamp(-joystick->rx(), ranges["ang_vel_z"][0].as<float>(), ranges["ang_vel_z"][1].as<float>());
+        cmd_vx = std::clamp(joystick_ly, ranges["lin_vel_x"][0].as<float>(), ranges["lin_vel_x"][1].as<float>());
+        cmd_vy = std::clamp(-joystick_lx, ranges["lin_vel_y"][0].as<float>(), ranges["lin_vel_y"][1].as<float>());
+        cmd_wz = std::clamp(-joystick_rx, ranges["ang_vel_z"][0].as<float>(), ranges["ang_vel_z"][1].as<float>());
     }
 
     csv_file_ << std::fixed << std::setprecision(6);
@@ -484,6 +506,7 @@ bool State_RLBase::intro_active() const
 
 void State_RLBase::pre_run()
 {
+    std::lock_guard<std::mutex> lock(observation_mutex);
     FSMState::pre_run();
     // Fall-safety and observations read ``env->robot``; without this, ``projected_gravity_b``
     // only updates on the policy thread (~decimation rate) and can stay at ctor-time / zero IMU
@@ -575,7 +598,10 @@ void State_RLBase::policy_loop()
     const auto dt = std::chrono::duration_cast<clock::duration>(desired_duration);
     auto sleep_till = clock::now() + dt;
 
-    env->reset();
+    {
+        std::lock_guard<std::mutex> lock(observation_mutex);
+        env->reset();
+    }
     // Raw policy outputs are affine-mapped to joint targets (scale * x + offset).
     // ``latest_action`` must hold *processed* positions for run() — not raw zeros.
     // Sending raw 0 as q() collapses the legs until the first ONNX step (~one period).
@@ -614,7 +640,10 @@ void State_RLBase::policy_loop()
         // handful of milliseconds before the fresh inference below lands.
         if (intro_cleanup_pending && !intro_running.load())
         {
-            env->reset();
+            {
+                std::lock_guard<std::mutex> lock(observation_mutex);
+                env->reset();
+            }
             {
                 std::vector<float> zero_raw(env->action_manager->total_action_dim(), 0.0f);
                 env->action_manager->process_action(zero_raw);
@@ -635,8 +664,12 @@ void State_RLBase::policy_loop()
         }
 
         env->episode_length += 1;
-        env->robot->update();
-        const auto obs_map = env->observation_manager->compute();
+        std::unordered_map<std::string, std::vector<float>> obs_map;
+        {
+            std::lock_guard<std::mutex> lock(observation_mutex);
+            env->robot->update();
+            obs_map = env->observation_manager->compute();
+        }
 
         std::vector<float> action;
         try
