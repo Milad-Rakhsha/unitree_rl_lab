@@ -150,9 +150,14 @@ def main() -> None:
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
+        # Select the saved task's matching play configuration.  In particular,
+        # `Unitree-Go2-Bipedal-Walk` must stay on its infinite plane; only the
+        # explicit rough task may select the rough-terrain play configuration.
         cfg_class_name = (
             "RobotBipedalWalkRoughPlayEnvCfg"
-            if "Bipedal" in task
+            if task == "Unitree-Go2-Bipedal-Walk-Rough"
+            else "RobotBipedalWalkPlayEnvCfg"
+            if task == "Unitree-Go2-Bipedal-Walk"
             else "RobotRoughPlayEnvCfg"
         )
         cfg_class = getattr(module, cfg_class_name)
@@ -204,7 +209,22 @@ def main() -> None:
     if args.joint_recovery_speed is not None:
         cfg.sim.physics.solver_cfg.joint_recovery_speed = args.joint_recovery_speed
     solver_cfg = cfg.sim.physics.solver_cfg
-    print(
+    # Newton-DVI and MJWarp expose different solver configuration surfaces.
+    # Keep the detailed DVI audit line, but do not dereference DVI-only fields
+    # when recording the native MJWarp backend.
+    if args.preset == "newton_mjwarp":
+        mjwarp_fields = {
+            name: getattr(solver_cfg, name)
+            for name in dir(solver_cfg)
+            if not name.startswith("_") and not callable(getattr(solver_cfg, name))
+        }
+        print(
+            "EFFECTIVE_MJWARP_PARAMS "
+            + " ".join(f"{name}={value}" for name, value in sorted(mjwarp_fields.items())),
+            flush=True,
+        )
+    else:
+        print(
         "EFFECTIVE_DVI_PARAMS "
         f"joint_limit_solver_type={solver_cfg.joint_limit_solver_type} "
         f"joint_limit_max_iterations={solver_cfg.joint_limit_max_iterations} "
@@ -236,7 +256,7 @@ def main() -> None:
         f"deterministic={solver_cfg.deterministic} "
         f"num_substeps={cfg.sim.physics.num_substeps}",
         flush=True,
-    )
+        )
     if args.num_envs < 1:
         raise ValueError("--num-envs must be positive")
     if args.joint_limit_tolerance < 0.0:

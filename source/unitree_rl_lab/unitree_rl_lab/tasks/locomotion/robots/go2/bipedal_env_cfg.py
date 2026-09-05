@@ -107,7 +107,7 @@ iterations to escape successive local optima:
   that flipped backward on handover in Mujoco; the added terms break
   that over-fit to PhysX-specific dynamics.
 * **Rear-foot air-time shaping** (``feet_air_time_positive_biped`` on
-  ``R[LR]_foot``, ``threshold=0.25`` s, ``weight=1.5``). Rewards
+  ``R[LR]_foot``, ``threshold=0.25`` s, ``weight=0.75``). Rewards
   single-stance air time on the rear feet whenever a non-trivial linear
   command is issued. Velocity tracking alone produced a shuffling stance
   that barely lifted either rear foot; the air-time reward actively
@@ -163,7 +163,7 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import ContactSensorCfg
+from isaaclab.sensors import ContactSensorCfg, PvaCfg
 from isaaclab_newton.sensors.contact_sensor.contact_sensor_cfg import ContactSensorCfg as NewtonContactSensorCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
@@ -287,6 +287,35 @@ class RobotSceneCfg(InteractiveSceneCfg):
         ],
         history_length=3,
         track_air_time=True,
+    )
+    contact_forces_head_shapes = NewtonContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/.*",
+        sensor_shape_prim_expr=[
+            "{ENV_REGEX_NS}/Robot/Head_lower/collisions/*",
+            "{ENV_REGEX_NS}/Robot/Head_upper/collisions/*",
+        ],
+        history_length=3,
+        track_air_time=True,
+    )
+    contact_forces_base_shapes = NewtonContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/.*",
+        sensor_shape_prim_expr=["{ENV_REGEX_NS}/Robot/base/collisions/*"],
+        history_length=3,
+        track_air_time=True,
+    )
+
+    # DVI collapses each massless fixed foot into its calf. These sites retain
+    # the original foot-body origins so foot clearance and slide use the same
+    # kinematic points as the uncollapsed MJWarp model. The USD fixed-joint
+    # local transform is exactly (0, 0, -0.213) m with identity relative
+    # rotation for both rear feet.
+    rear_left_foot_kinematics = PvaCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/RL_calf",
+        offset=PvaCfg.OffsetCfg(pos=(0.0, 0.0, -0.213)),
+    )
+    rear_right_foot_kinematics = PvaCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/RR_calf",
+        offset=PvaCfg.OffsetCfg(pos=(0.0, 0.0, -0.213)),
     )
 
     sky_light = AssetBaseCfg(
@@ -690,7 +719,7 @@ class RewardsCfg:
     │   dof_pos_limits        │ -10.0  │ Joint position limit violation   │
     ├─────────────────────────┼────────┼──────────────────────────────────┤
     │ 6. GAIT SHAPING (mixed) │        │ Produce alternating rear-leg gait│
-    │   rear_feet_air_time    │  +1.5  │ Single-stance air time reward    │
+    │   rear_feet_air_time    │ +0.75  │ Single-stance air time reward    │
     │   rear_feet_flight      │ -0.75  │ Both-feet-airborne (pronk) pen.  │
     │   rear_feet_clearance   │  +0.5  │ Swing foot height reward         │
     │   rear_feet_slide       │ -0.25  │ In-contact foot slide penalty    │
@@ -1065,7 +1094,7 @@ class RewardsCfg:
     #   produced the V-pose; the current value is the minimum that breaks
     #   that local optimum.
     # INTERACTIONS: Balances against track_lin_vel_xy (+2.0) and
-    #   rear_feet_air_time (+1.5) — the walking rewards must exceed the
+    #   rear_feet_air_time (+0.75) — the walking rewards must exceed the
     #   motion penalty cost of each step.
     rear_hip_motion = RewTerm(
         func=bipedal_mdp.joint_deviation_from_default_l1,
@@ -1164,7 +1193,7 @@ class RewardsCfg:
     # single-stance walking gait on the rear legs. Each term blocks a
     # specific local optimum:
     #
-    #   rear_feet_air_time (+1.5)  → blocks SHUFFLING (both feet always
+    #   rear_feet_air_time (+0.75) → blocks SHUFFLING (both feet always
     #                                 on ground, tiny steps)
     #   rear_feet_flight   (-0.75) → blocks PRONKING (both feet airborne
     #                                 simultaneously, hopping forward)
@@ -1179,7 +1208,7 @@ class RewardsCfg:
     # is not penalised/rewarded for gait quality while standing in place.
     # ===================================================================
 
-    # ---- rear_feet_air_time (w=+1.5) ----
+    # ---- rear_feet_air_time (w=+0.75) ----
     # WHAT: Single-stance air-time reward on rear feet. Rewards air time
     #   on each rear foot individually, but ONLY when the other foot is
     #   in contact (single-stance phase). When both feet are airborne
@@ -1187,32 +1216,52 @@ class RewardsCfg:
     # WHY: Velocity tracking alone produced a shuffling stance that barely
     #   lifted either rear foot. This term actively pushes the gait toward
     #   a clean alternating single-stance walking pattern.
-    # WEIGHT RATIONALE: +1.5 (raised from 1.0). The higher weight makes
-    #   the single-stance reward large enough to dominate the local-optimum
-    #   rewards from shuffling. At 1.0, the motion penalty cost of lifting
-    #   a leg occasionally exceeded the air-time reward.
+    # EXPERIMENTAL WEIGHT: +0.75, halved from +1.5 to test whether reducing
+    #   the incentive for prolonged single stance produces a more symmetric,
+    #   parallel rear-foot gait under DVI while preserving enough incentive
+    #   to avoid the original shuffling local optimum.
     # INTERACTIONS: Complemented by rear_feet_flight (-0.75) which makes
     #   two-feet-airborne negative (this term only makes it zero). Together
     #   they create a strong preference for alternating single-stance.
     #   Also interacts with rear_feet_clearance (+0.5) which rewards the
     #   foot *height* during the air phase this term rewards the *duration* of.
     #
-    # EXPERIMENTAL (2026-04-18): threshold lowered 0.4 -> 0.25 and weight
-    # raised 1.0 -> 1.5. The 0.4 s target required the rear-leg swing to be
+    # HISTORY (2026-04-18): threshold lowered 0.4 -> 0.25 and weight raised
+    # 1.0 -> 1.5. The 0.4 s target required the rear-leg swing to be
     # longer than one half-stride at ~1 m/s; the policy found it cheaper to
     # pronk (both feet airborne together) than to time a 0.4 s single-stance
     # swing. 0.25 s matches a realistic single-step air-time at walking
     # pace, and the higher weight makes the single-stance reward large
     # enough to dominate the local-optimum rewards from shuffling.
+    # EXPERIMENT (2026-09-01): weight halved 1.5 -> 0.75; all other reward
+    # terms and DVI solver settings remain unchanged.
     rear_feet_air_time = RewTerm(
         func=mdp.feet_air_time_positive_biped,
-        weight=1.5,
+        weight=0.75,
         params={
             "command_name": "base_velocity",
             "threshold": 0.25,
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names="R[LR]_foot"),
         },
     )
+    # ---- rear_feet_airborne_at_standstill (disabled) ----
+    # WHAT: At a near-zero full velocity command, returns the fraction of
+    # rear feet that are airborne: 0.0 for double stance, 0.5 for one lifted
+    # foot, and 1.0 for both feet lifted.
+    # WHY: The active-walking gait terms are intentionally gated off at rest,
+    # so they cannot discourage learned in-place marching. This negative term
+    # supplies that missing standstill-specific incentive without penalizing
+    # commanded forward, lateral, or yaw motion.
+    # rear_feet_airborne_at_standstill = RewTerm(
+    #     func=bipedal_mdp.rear_feet_airborne_at_standstill,
+    #     weight=-0.2,
+    #     params={
+    #         "command_name": "base_velocity",
+    #         "sensor_cfg": SceneEntityCfg("contact_forces", body_names="R[LR]_foot"),
+    #         "min_command_magnitude": 0.1,
+    #     },
+    # )
+
     # ---- rear_feet_flight (w=-0.75) ----
     # WHAT: Both-feet-airborne (pronk/flight) penalty. Returns 1.0 per
     #   step when BOTH rear feet are simultaneously off the ground and
@@ -1222,13 +1271,12 @@ class RewardsCfg:
     #   optimum — the policy could accumulate tracking reward without
     #   learning alternating leg coordination. This term makes the
     #   two-feet-airborne state strictly negative.
-    # WEIGHT RATIONALE: -0.75, half the air-time reward (+1.5). This means
-    #   a single timestep of double-flight costs 0.75 while a single
-    #   timestep of correct single-stance earns 1.5, creating a 2:1
-    #   preference ratio for walking over pronking.
-    # INTERACTIONS: Directly paired with rear_feet_air_time (+1.5) —
+    # WEIGHT RATIONALE: -0.75. In this experiment it matches the halved
+    #   air-time reward magnitude, so double-flight and correct single stance
+    #   have a 1:1 per-step penalty/reward magnitude.
+    # INTERACTIONS: Directly paired with rear_feet_air_time (+0.75) —
     #   together they create the asymmetric reward landscape:
-    #     single-stance: +1.5 (rewarded)
+    #     single-stance: +0.75 (rewarded)
     #     double-stance:  0.0 (neutral)
     #     double-flight: -0.75 (penalised)
     #
@@ -1259,7 +1307,7 @@ class RewardsCfg:
     #   local optimum where the swing foot scrapes just above the floor,
     #   satisfying the contact sensor threshold without clearing obstacles.
     #   This term rewards bringing the swing foot to 10 cm height.
-    # WEIGHT RATIONALE: +0.5 (1/3 of air_time at +1.5). Moderate because
+    # WEIGHT RATIONALE: +0.5 (2/3 of air time at +0.75). Moderate because
     #   the clearance target is aspirational — not every step needs to
     #   reach exactly 10 cm — but strong enough that dragging (z≈0 cm,
     #   reward≈0.02) is clearly worse than lifting (z=10 cm, reward≈1.0).
@@ -1309,7 +1357,7 @@ class RewardsCfg:
     # INTERACTIONS: Paired with rear_feet_clearance (+0.5) — they
     #   address the same dragging problem from opposite ends (swing height
     #   vs. stance velocity). Also interacts with rear_feet_air_time
-    #   (+1.5) which rewards the air phase between stance phases.
+    #   (+0.75) which rewards the air phase between stance phases.
     #
     # EXPERIMENTAL (2026-04-18): in-contact foot-slide penalty. Directly
     # punishes horizontal foot velocity while the foot is loaded, which is
@@ -1319,7 +1367,7 @@ class RewardsCfg:
     # linearly with slide speed; this should not discourage the small,
     # short-duration slip that happens at every heel-strike.
     rear_feet_slide = RewTerm(
-        func=mdp.feet_slide,
+        func=bipedal_mdp.feet_slide_reward,
         weight=-0.25,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names="R[LR]_foot"),
@@ -1546,20 +1594,28 @@ class BipedalFlatPhysicsCfg(PresetCfg):
         num_substeps=1,
         debug_mode=False,
     )
+    # Deliberately identical to BipedalRoughPhysicsCfg.newton_dvi: the
+    # flat-policy transfer experiment changes terrain geometry only.
     newton_dvi: NewtonCfg = NewtonCfg(
         solver_cfg=DVISolverCfg(
             joint_solver_type="sparse_ldl",
-            joint_alpha=0.0,
+            joint_reg=1.0e-6,
+            joint_alpha=0.002,
             joint_recovery_speed=100000.0,
             joint_iterative_refinement_steps=1,
             joint_limit_solver_type="sparse_jacobi",
             contact_solver_type="sparse_apgd",
-            contact_max_iterations=20,
-            contact_omega=0.15,
-            contact_reg=1.0e-3,
-            contact_compliance=1.0e-7,
-            contact_alpha=0.0,
-            contact_recovery_speed=5.0,
+            contact_max_iterations=40,
+            contact_omega=0.05,
+            contact_relax=0.7,
+            contact_friction_projection="cone",
+            contact_reg=1.0e-4,
+            contact_compliance=1e-7,
+            contact_alpha=0.002,
+            contact_recovery_speed=2.0,
+            contact_tolerance=1.0e-5,
+            contact_early_exit=True,
+            contact_residual_mode="complementarity",
             coupling_iterations=2,
             post_stabilize_joints=False,
             angular_damping=0.0,
@@ -1569,8 +1625,11 @@ class BipedalFlatPhysicsCfg(PresetCfg):
         debug_mode=False,
         use_cuda_graph=True,
         collapse_fixed_joints=True,
-        default_shape_cfg=NewtonShapeCfg(gap=0.005),
-        collision_cfg=NewtonCollisionPipelineCfg(rigid_contact_max=665536),
+        default_shape_cfg=NewtonShapeCfg(margin=0.01),
+        collision_cfg=NewtonCollisionPipelineCfg(
+            rigid_contact_max=665536,
+            max_triangle_pairs=2_500_000,
+        ),
     )
     physx = default
 
@@ -1607,18 +1666,24 @@ class BipedalRoughPhysicsCfg(PresetCfg):
     newton_dvi: NewtonCfg = NewtonCfg(
         solver_cfg=DVISolverCfg(
             joint_solver_type="sparse_ldl",
-            joint_alpha=0.0,
+            joint_reg=1.0e-6,
+            joint_alpha=0.002,
             joint_recovery_speed=100000.0,
             joint_iterative_refinement_steps=1,
             joint_limit_solver_type="sparse_jacobi",
-            contact_solver_type="sparse_jacobi",
-            contact_max_iterations=60,
-            contact_omega=0.1,
-            contact_reg=1.0e-3,
-            contact_compliance=1.0e-6,
-            contact_alpha=0.0,
-            contact_recovery_speed=10.0,
-            coupling_iterations=1,
+            contact_solver_type="sparse_apgd",
+            contact_max_iterations=40,
+            contact_omega=0.05,
+            contact_relax=0.7,
+            contact_friction_projection="cone",
+            contact_reg=1.0e-4,
+            contact_compliance=1e-7,
+            contact_alpha=0.002,
+            contact_recovery_speed=2.0,
+            contact_tolerance=1.0e-5,
+            contact_early_exit=True,
+            contact_residual_mode="complementarity",
+            coupling_iterations=2,
             post_stabilize_joints=False,
             angular_damping=0.0,
             actuator_integration="explicit",
@@ -1627,9 +1692,7 @@ class BipedalRoughPhysicsCfg(PresetCfg):
         debug_mode=False,
         use_cuda_graph=True,
         collapse_fixed_joints=True,
-        # Match the validated four-legged velocity-rough DVI contact shape settings.
-        # Leave margin at its Newton default (0.0) and use an explicit 5 mm gap.
-        default_shape_cfg=NewtonShapeCfg(gap=0.005),
+        default_shape_cfg=NewtonShapeCfg(margin=0.01),
         collision_cfg=NewtonCollisionPipelineCfg(
             rigid_contact_max=665536,
             max_triangle_pairs=2_500_000,
@@ -1679,12 +1742,24 @@ class RobotBipedalWalkEnvCfg(ManagerBasedRLEnvCfg):
         # including DVI.  Do not replace it with an IsaacLab implicit-PD
         # actuator: the Unitree actuator supplies the tuned torque-speed,
         # friction, stiffness, damping, and effort-limit behavior.
+        #
+        # The MuJoCo deployment model uses 0.01 kg m^2 on every actuated
+        # joint.  Set the physics-model armature explicitly here as well;
+        # leaving it unspecified resolves to zero in the native DVI model.
+        # This is a dynamics change relative to the earlier flat DVI run.
+        for actuator_cfg in self.scene.robot.actuators.values():
+            actuator_cfg.armature = 0.01
         # Select shape-level Newton sensors only for DVI. The reward
         # mathematics and weights remain unchanged; only sensor rows change
         # because fixed-joint collapse puts foot shapes on calf bodies.
         rear_sensor_cfgs = [
             getattr(self.rewards, name).params["sensor_cfg"]
-            for name in ("rear_feet_air_time", "rear_feet_flight", "rear_feet_slide")
+            for name in (
+                "rear_feet_air_time",
+                # "rear_feet_airborne_at_standstill",
+                "rear_feet_flight",
+                "rear_feet_slide",
+            )
         ]
         for sensor_cfg in rear_sensor_cfgs:
             sensor_cfg.name = preset(
@@ -1728,19 +1803,59 @@ class RobotBipedalWalkEnvCfg(ManagerBasedRLEnvCfg):
             reward = getattr(self.rewards, reward_name)
             reward.params["asset_cfg"].body_names = preset(
                 default="R[LR]_foot",
-                newton_mjwarp="R[LR]_calf",
+                newton_mjwarp="R[LR]_foot",
+                # PVA supplies the original foot-point kinematics under DVI;
+                # the calf ids are retained only as valid resolved body ids.
                 newton_dvi="R[LR]_calf",
             )
-        # Calf contact remains active under DVI: its shape-level sensor
-        # excludes the separately sensed foot collision meshes.  Head contact
-        # remains disabled for DVI because head geometry is collapsed into the
-        # base body and has not yet been split into a dedicated shape sensor.
-        self.rewards.head_contact = preset(
-            default=self.rewards.head_contact,
-            newton_mjwarp=None,
-            newton_dvi=None,
+            reward.params["kinematics_sensor_names"] = preset(
+                default=None,
+                newton_mjwarp=None,
+                newton_dvi=[
+                    "rear_left_foot_kinematics",
+                    "rear_right_foot_kinematics",
+                ],
+            )
+
+        # Preserve the original head-contact reward under fixed-joint collapse
+        # by selecting only the two head collision shapes now owned by base.
+        self.rewards.head_contact.params["sensor_cfg"].name = preset(
+            default="contact_forces",
+            newton_mjwarp="contact_forces",
+            newton_dvi="contact_forces_head_shapes",
         )
-        self.scene.contact_forces.update_period = self.sim.dt
+        self.rewards.head_contact.params["sensor_cfg"].body_names = preset(
+            default=["Head_.*"],
+            newton_mjwarp=["Head_.*"],
+            newton_dvi="Head_lower/collisions/.*|Head_upper/collisions/.*",
+        )
+
+        # Head shapes are merged into the base rigid body by DVI collapse.
+        # Keep base-contact termination restricted to the original base shape;
+        # otherwise a head strike would terminate as a base strike.
+        self.terminations.base_contact.params["sensor_cfg"].name = preset(
+            default="contact_forces",
+            newton_mjwarp="contact_forces",
+            newton_dvi="contact_forces_base_shapes",
+        )
+        self.terminations.base_contact.params["sensor_cfg"].body_names = preset(
+            default="base",
+            newton_mjwarp="base",
+            newton_dvi="base/collisions/.*",
+        )
+
+        # Match the original sensor cadence explicitly for every contact path.
+        for sensor_name in (
+            "contact_forces",
+            "contact_forces_rear_feet",
+            "contact_forces_calf_shapes",
+            "contact_forces_front_feet",
+            "contact_forces_head_shapes",
+            "contact_forces_base_shapes",
+        ):
+            getattr(self.scene, sensor_name).update_period = self.sim.dt
+        self.scene.rear_left_foot_kinematics.update_period = self.sim.dt
+        self.scene.rear_right_foot_kinematics.update_period = self.sim.dt
 
 
 @configclass
